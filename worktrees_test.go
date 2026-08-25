@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseWorktrees(t *testing.T) {
@@ -90,6 +91,39 @@ func TestDiscoverAndRemoveExistingAndMissingWorktrees(t *testing.T) {
 	}
 }
 
+func TestModificationTimeFindsNewestFilesystemEntry(t *testing.T) {
+	root := t.TempDir()
+	olderPath := filepath.Join(root, "older")
+	newerPath := filepath.Join(root, "nested", "newer")
+	if err := os.MkdirAll(filepath.Dir(newerPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(olderPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newerPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	older := time.Date(2025, 1, 2, 3, 4, 5, 0, time.Local)
+	newer := older.Add(time.Hour)
+	if err := os.Chtimes(olderPath, older, older); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(newerPath, newer, newer); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Dir(newerPath), older, older); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(root, older, older); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := modificationTime(root); !got.Equal(newer) {
+		t.Fatalf("got %s, want %s", got, newer)
+	}
+}
+
 func TestModelFiltersAndSelectsVisibleRows(t *testing.T) {
 	repositories := []repository{{
 		Name: "example",
@@ -136,6 +170,23 @@ func TestModelShowsMissingWorktreeExplicitly(t *testing.T) {
 	view := m.browseView()
 	if !strings.Contains(view, "missing") || !strings.Contains(view, "missing (prunable; Git record only)") {
 		t.Fatalf("missing worktree state was not rendered: %q", view)
+	}
+}
+
+func TestModelShowsModificationScanProgressAndResult(t *testing.T) {
+	m := newModel([]repository{{
+		Name:      "example",
+		Worktrees: []worktree{{Path: "/tmp/example"}},
+	}})
+	if !strings.Contains(m.browseView(), "scanning") {
+		t.Fatal("modification scan progress was not rendered")
+	}
+
+	modified := time.Date(2026, 8, 24, 12, 0, 0, 0, time.Local)
+	updated, _ := m.Update(modificationTimeMsg{row: m.rows[0], modifiedAt: modified})
+	m = updated.(model)
+	if !strings.Contains(m.browseView(), "2026-08-24") {
+		t.Fatal("modification date was not rendered")
 	}
 }
 

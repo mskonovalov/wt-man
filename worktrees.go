@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/charlievieth/fastwalk"
 )
 
 type sessionCounts struct {
@@ -23,14 +25,15 @@ type sessionCounts struct {
 }
 
 type worktree struct {
-	Path      string
-	Branch    string
-	Detached  bool
-	Locked    bool
-	Prunable  bool
-	Missing   bool
-	CreatedAt time.Time
-	Sessions  sessionCounts
+	Path       string
+	Branch     string
+	Detached   bool
+	Locked     bool
+	Prunable   bool
+	Missing    bool
+	CreatedAt  time.Time
+	ModifiedAt time.Time
+	Sessions   sessionCounts
 }
 
 type repository struct {
@@ -288,6 +291,27 @@ func removeWorktree(ctx context.Context, repo repository, item worktree, deleteB
 		result.BranchDeleted = true
 	}
 	return result
+}
+
+func modificationTime(path string) time.Time {
+	var latest time.Time
+	var lock sync.Mutex
+	_ = fastwalk.Walk(nil, path, func(_ string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil
+		}
+		lock.Lock()
+		if info.ModTime().After(latest) {
+			latest = info.ModTime()
+		}
+		lock.Unlock()
+		return nil
+	})
+	return latest
 }
 
 func git(ctx context.Context, directory string, args ...string) (string, error) {

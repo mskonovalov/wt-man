@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
@@ -43,22 +44,28 @@ type deletionResult struct {
 
 type deletionFinishedMsg []deletionResult
 
+type modificationTimeMsg struct {
+	row        row
+	modifiedAt time.Time
+}
+
 type model struct {
-	repositories    []repository
-	rows            []row
-	visible         []row
-	selected        map[string]bool
-	cursor          int
-	offset          int
-	width           int
-	height          int
-	query           string
-	filtering       bool
-	screen          screen
-	deleteBranches  bool
-	results         []deletionResult
-	repositoryWidth int
-	sessionMode     sessionMode
+	repositories      []repository
+	rows              []row
+	visible           []row
+	selected          map[string]bool
+	cursor            int
+	offset            int
+	width             int
+	height            int
+	query             string
+	filtering         bool
+	screen            screen
+	deleteBranches    bool
+	results           []deletionResult
+	repositoryWidth   int
+	sessionMode       sessionMode
+	modificationQueue []row
 }
 
 func newModel(repositories []repository) model {
@@ -73,7 +80,11 @@ func newModel(repositories []repository) model {
 			m.repositoryWidth = width
 		}
 		for worktreeIndex := range repo.Worktrees {
-			m.rows = append(m.rows, row{repository: repositoryIndex, worktree: worktreeIndex})
+			current := row{repository: repositoryIndex, worktree: worktreeIndex}
+			m.rows = append(m.rows, current)
+			if !repo.Worktrees[worktreeIndex].Missing {
+				m.modificationQueue = append(m.modificationQueue, current)
+			}
 		}
 	}
 	m.visible = append([]row(nil), m.rows...)
@@ -81,7 +92,11 @@ func newModel(repositories []repository) model {
 }
 
 func (m model) Init() tea.Cmd {
-	return nil
+	if len(m.modificationQueue) == 0 {
+		return nil
+	}
+	current := m.modificationQueue[0]
+	return scanModificationTime(current, m.item(current).Path)
 }
 
 func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
@@ -95,6 +110,14 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.results = []deletionResult(message)
 		m.screen = resultsScreen
 		return m, nil
+	case modificationTimeMsg:
+		m.repositories[message.row.repository].Worktrees[message.row.worktree].ModifiedAt = message.modifiedAt
+		m.modificationQueue = m.modificationQueue[1:]
+		if len(m.modificationQueue) == 0 {
+			return m, nil
+		}
+		current := m.modificationQueue[0]
+		return m, scanModificationTime(current, m.item(current).Path)
 	case tea.KeyPressMsg:
 		if message.String() == "ctrl+c" {
 			return m, tea.Quit
@@ -241,10 +264,10 @@ func (m model) item(current row) worktree {
 }
 
 func (m model) pageSize() int {
-	if m.height < 11 {
+	if m.height < 12 {
 		return 1
 	}
-	return m.height - 10
+	return m.height - 11
 }
 
 func (m *model) ensureCursorVisible() {
@@ -294,6 +317,8 @@ func (m model) browseView() string {
 	if end > len(m.visible) {
 		end = len(m.visible)
 	}
+	fmt.Fprintf(&output, "      %-*s %-10s %-10s %-8s %-16s %s\n",
+		m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "BRANCH", "PATH")
 	for index := m.offset; index < end; index++ {
 		current := m.visible[index]
 		repo := m.repositories[current.repository]
@@ -316,6 +341,14 @@ func (m model) browseView() string {
 		} else if !item.CreatedAt.IsZero() {
 			created = item.CreatedAt.Format("2006-01-02")
 		}
+		modified := "scanning"
+		if item.Missing {
+			modified = "missing"
+		} else if !item.ModifiedAt.IsZero() {
+			modified = item.ModifiedAt.Format("2006-01-02")
+		} else if len(m.modificationQueue) == 0 {
+			modified = "unknown"
+		}
 		branch := item.Branch
 		if branch == "" {
 			branch = "detached"
@@ -324,9 +357,9 @@ func (m model) browseView() string {
 		if item.Sessions.Claude+item.Sessions.Codex > 0 {
 			warning = " !"
 		}
-		line := fmt.Sprintf("%s [%s] %-*s %-10s C%d X%d%s  %-16s %s",
-			pointer, checked, m.repositoryWidth, repoName, created,
-			item.Sessions.Claude, item.Sessions.Codex, warning,
+		sessions := fmt.Sprintf("C%d X%d%s", item.Sessions.Claude, item.Sessions.Codex, warning)
+		line := fmt.Sprintf("%s [%s] %-*s %-10s %-10s %-8s %-16s %s",
+			pointer, checked, m.repositoryWidth, repoName, created, modified, sessions,
 			truncate(branch, 16), item.Path)
 		output.WriteString(truncate(line, m.width))
 		output.WriteByte('\n')
@@ -346,6 +379,12 @@ func (m model) browseView() string {
 		output.WriteByte('\n')
 	}
 	return output.String()
+}
+
+func scanModificationTime(current row, path string) tea.Cmd {
+	return func() tea.Msg {
+		return modificationTimeMsg{row: current, modifiedAt: modificationTime(path)}
+	}
 }
 
 func (mode sessionMode) label() string {

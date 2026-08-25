@@ -2,7 +2,10 @@ module github.com/mskonovalov/wt-man
 
 go 1.27.0
 
-require charm.land/bubbletea/v2 v2.0.9
+require (
+	charm.land/bubbletea/v2 v2.0.9
+	github.com/charlievieth/fastwalk v1.0.14
+)
 
 require (
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
