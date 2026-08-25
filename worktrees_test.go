@@ -67,6 +67,34 @@ func TestModelUsesFullRepositoryNameWidth(t *testing.T) {
 	}
 }
 
+func TestModelFiltersByUnarchivedSessions(t *testing.T) {
+	m := newModel([]repository{{
+		Name: "example",
+		Worktrees: []worktree{
+			{Path: "/tmp/open", Sessions: sessionCounts{Claude: 1}},
+			{Path: "/tmp/archived"},
+		},
+	}})
+
+	updated, _ := m.updateKey("u")
+	m = updated.(model)
+	if len(m.visible) != 1 || m.item(m.visible[0]).Path != "/tmp/open" {
+		t.Fatalf("unexpected with-unarchived results: %#v", m.visible)
+	}
+
+	updated, _ = m.updateKey("u")
+	m = updated.(model)
+	if len(m.visible) != 1 || m.item(m.visible[0]).Path != "/tmp/archived" {
+		t.Fatalf("unexpected without-unarchived results: %#v", m.visible)
+	}
+
+	updated, _ = m.updateKey("u")
+	m = updated.(model)
+	if len(m.visible) != 2 {
+		t.Fatalf("got %d results after cycling to all", len(m.visible))
+	}
+}
+
 func TestClaudeSessionJSONFields(t *testing.T) {
 	data := []byte(`{"sessionId":"abc","cwd":"/tmp/example","isArchived":false}`)
 	var session struct {

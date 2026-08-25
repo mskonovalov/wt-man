@@ -19,6 +19,14 @@ const (
 	resultsScreen
 )
 
+type sessionMode int
+
+const (
+	allSessions sessionMode = iota
+	withUnarchivedSessions
+	withoutUnarchivedSessions
+)
+
 type row struct {
 	repository int
 	worktree   int
@@ -49,6 +57,7 @@ type model struct {
 	deleteBranches  bool
 	results         []deletionResult
 	repositoryWidth int
+	sessionMode     sessionMode
 }
 
 func newModel(repositories []repository) model {
@@ -147,6 +156,9 @@ func (m model) updateKey(key string) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "/":
 		m.filtering = true
+	case "u":
+		m.sessionMode = (m.sessionMode + 1) % 3
+		m.applyFilter()
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
@@ -188,7 +200,11 @@ func (m *model) applyFilter() {
 		repo := m.repositories[current.repository]
 		item := repo.Worktrees[current.worktree]
 		haystack := strings.ToLower(repo.Name + " " + item.Branch + " " + item.Path)
-		if strings.Contains(haystack, query) {
+		hasUnarchived := item.Sessions.Claude+item.Sessions.Codex > 0
+		sessionMatches := m.sessionMode == allSessions ||
+			(m.sessionMode == withUnarchivedSessions && hasUnarchived) ||
+			(m.sessionMode == withoutUnarchivedSessions && !hasUnarchived)
+		if strings.Contains(haystack, query) && sessionMatches {
 			m.visible = append(m.visible, current)
 		}
 	}
@@ -263,13 +279,14 @@ func (m model) View() tea.View {
 
 func (m model) browseView() string {
 	var output strings.Builder
-	fmt.Fprintf(&output, "\n\x1b[1mwt-man\x1b[0m  %d worktrees  %d selected\n", len(m.visible), len(m.selectedRows()))
+	fmt.Fprintf(&output, "\n\x1b[1mwt-man\x1b[0m  %d worktrees  %d selected  sessions: %s\n",
+		len(m.visible), len(m.selectedRows()), m.sessionMode.label())
 	if m.filtering {
 		fmt.Fprintf(&output, "Filter: %s█\n\n", m.query)
 	} else if m.query != "" {
 		fmt.Fprintf(&output, "Filter: %s  (/ to edit)\n\n", m.query)
 	} else {
-		output.WriteString("/ filter  space select  a all  enter review  q quit\n\n")
+		output.WriteString("/ text filter  u session filter  space select  a all  enter review  q quit\n\n")
 	}
 
 	end := m.offset + m.pageSize()
@@ -322,6 +339,17 @@ func (m model) browseView() string {
 		output.WriteByte('\n')
 	}
 	return output.String()
+}
+
+func (mode sessionMode) label() string {
+	switch mode {
+	case withUnarchivedSessions:
+		return "with unarchived"
+	case withoutUnarchivedSessions:
+		return "without unarchived"
+	default:
+		return "all"
+	}
 }
 
 func (m model) reviewView() string {

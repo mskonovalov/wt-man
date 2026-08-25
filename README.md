@@ -29,6 +29,7 @@ Keys:
 - Space: select
 - a: select or clear all visible worktrees
 - /: filter by repository, branch, or path
+- u: cycle between all, with unarchived sessions, and without unarchived sessions
 - Enter: review selected worktrees
 - x: toggle local branch deletion on the review screen
 - D: confirm deletion from the review screen
