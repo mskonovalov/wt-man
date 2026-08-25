@@ -35,19 +35,20 @@ type deletionResult struct {
 type deletionFinishedMsg []deletionResult
 
 type model struct {
-	repositories   []repository
-	rows           []row
-	visible        []row
-	selected       map[string]bool
-	cursor         int
-	offset         int
-	width          int
-	height         int
-	query          string
-	filtering      bool
-	screen         screen
-	deleteBranches bool
-	results        []deletionResult
+	repositories    []repository
+	rows            []row
+	visible         []row
+	selected        map[string]bool
+	cursor          int
+	offset          int
+	width           int
+	height          int
+	query           string
+	filtering       bool
+	screen          screen
+	deleteBranches  bool
+	results         []deletionResult
+	repositoryWidth int
 }
 
 func newModel(repositories []repository) model {
@@ -58,6 +59,9 @@ func newModel(repositories []repository) model {
 		width:        100,
 	}
 	for repositoryIndex, repo := range repositories {
+		if width := utf8.RuneCountInString(repo.Name); width > m.repositoryWidth {
+			m.repositoryWidth = width
+		}
 		for worktreeIndex := range repo.Worktrees {
 			m.rows = append(m.rows, row{repository: repositoryIndex, worktree: worktreeIndex})
 		}
@@ -300,8 +304,8 @@ func (m model) browseView() string {
 		if item.Sessions.Claude+item.Sessions.Codex > 0 {
 			warning = " !"
 		}
-		line := fmt.Sprintf("%s [%s] %-12s %-10s C%d X%d%s  %-16s %s",
-			pointer, checked, truncate(repoName, 12), created,
+		line := fmt.Sprintf("%s [%s] %-*s %-10s C%d X%d%s  %-16s %s",
+			pointer, checked, m.repositoryWidth, repoName, created,
 			item.Sessions.Claude, item.Sessions.Codex, warning,
 			truncate(branch, 16), item.Path)
 		output.WriteString(truncate(line, m.width))

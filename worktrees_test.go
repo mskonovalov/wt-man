@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -50,6 +51,19 @@ func TestModelFiltersAndSelectsVisibleRows(t *testing.T) {
 	m.toggleAllVisible()
 	if !m.selected["/tmp/two"] || m.selected["/tmp/one"] {
 		t.Fatalf("unexpected selection: %#v", m.selected)
+	}
+}
+
+func TestModelUsesFullRepositoryNameWidth(t *testing.T) {
+	m := newModel([]repository{
+		{Name: "short", Worktrees: []worktree{{Path: "/tmp/one"}}},
+		{Name: "a-much-longer-repository", Worktrees: []worktree{{Path: "/tmp/two"}}},
+	})
+	if m.repositoryWidth != len("a-much-longer-repository") {
+		t.Fatalf("got repository width %d", m.repositoryWidth)
+	}
+	if !strings.Contains(m.browseView(), "a-much-longer-repository") {
+		t.Fatal("full repository name was not rendered")
 	}
 }
 
