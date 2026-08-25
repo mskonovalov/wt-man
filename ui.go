@@ -66,6 +66,7 @@ type model struct {
 	deleteBranches    bool
 	results           []deletionResult
 	repositoryWidth   int
+	branchWidth       int
 	sessionMode       sessionMode
 	modificationQueue []row
 	modificationTotal int
@@ -80,16 +81,25 @@ func newModel(repositories []repository) model {
 	cache := readModificationCache()
 	cacheCutoff := time.Now().Add(-modificationCacheTTL)
 	m := model{
-		repositories: repositories,
-		selected:     make(map[string]bool),
-		height:       24,
-		width:        100,
+		repositories:    repositories,
+		selected:        make(map[string]bool),
+		height:          24,
+		width:           100,
+		repositoryWidth: utf8.RuneCountInString("REPOSITORY"),
+		branchWidth:     utf8.RuneCountInString("BRANCH"),
 	}
 	for repositoryIndex, repo := range repositories {
 		if width := utf8.RuneCountInString(repo.Name); width > m.repositoryWidth {
 			m.repositoryWidth = width
 		}
 		for worktreeIndex := range repo.Worktrees {
+			branch := repo.Worktrees[worktreeIndex].Branch
+			if branch == "" {
+				branch = "detached"
+			}
+			if width := utf8.RuneCountInString(branch); width > m.branchWidth {
+				m.branchWidth = width
+			}
 			current := row{repository: repositoryIndex, worktree: worktreeIndex}
 			m.rows = append(m.rows, current)
 			if !repo.Worktrees[worktreeIndex].Missing {
@@ -312,7 +322,14 @@ func (m model) pageSize() int {
 	if m.height < 13 {
 		return 1
 	}
-	return m.height - 12
+	size := m.height - 12
+	if m.compactRows() {
+		size /= 2
+	}
+	if size < 1 {
+		return 1
+	}
+	return size
 }
 
 func (m *model) ensureCursorVisible() {
@@ -428,8 +445,18 @@ func (m model) browseView() string {
 	if end > len(m.visible) {
 		end = len(m.visible)
 	}
-	fmt.Fprintf(&output, "      %-*s %-10s %-10s %-8s %-16s %s\n",
-		m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "BRANCH", "PATH")
+	compact := m.compactRows()
+	pathWidth := m.pathColumnWidth()
+	if compact {
+		fmt.Fprintf(&output, "      %-*s %-10s %-10s %s\n",
+			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS")
+	} else if pathWidth > 0 {
+		fmt.Fprintf(&output, "      %-*s %-10s %-10s %-8s %-*s %s\n",
+			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", m.branchWidth, "BRANCH", "PATH")
+	} else {
+		fmt.Fprintf(&output, "      %-*s %-10s %-10s %-8s %s\n",
+			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "BRANCH")
+	}
 	for index := m.offset; index < end; index++ {
 		current := m.visible[index]
 		repo := m.repositories[current.repository]
@@ -469,10 +496,19 @@ func (m model) browseView() string {
 			warning = " !"
 		}
 		sessions := fmt.Sprintf("C%d X%d%s", item.Sessions.Claude, item.Sessions.Codex, warning)
-		line := fmt.Sprintf("%s [%s] %-*s %-10s %-10s %-8s %-16s %s",
-			pointer, checked, m.repositoryWidth, repoName, created, modified, sessions,
-			truncate(branch, 16), item.Path)
-		output.WriteString(truncate(line, m.width))
+		line := fmt.Sprintf("%s [%s] %-*s %-10s %-10s %-8s",
+			pointer, checked, m.repositoryWidth, repoName, created, modified, sessions)
+		if compact {
+			output.WriteString(truncate(line, m.width))
+			output.WriteByte('\n')
+			output.WriteString("      Branch: " + branch)
+		} else {
+			line += fmt.Sprintf(" %-*s", m.branchWidth, branch)
+			if pathWidth > 0 {
+				line += " " + truncate(item.Path, pathWidth)
+			}
+			output.WriteString(truncate(line, m.width))
+		}
 		output.WriteByte('\n')
 	}
 	if len(m.visible) == 0 {
@@ -490,6 +526,21 @@ func (m model) browseView() string {
 		output.WriteByte('\n')
 	}
 	return output.String()
+}
+
+func (m model) pathColumnWidth() int {
+	if m.compactRows() {
+		return 0
+	}
+	width := m.width - 38 - m.repositoryWidth - m.branchWidth
+	if width < 12 {
+		return 0
+	}
+	return width
+}
+
+func (m model) compactRows() bool {
+	return 37+m.repositoryWidth+m.branchWidth > m.width
 }
 
 func scanModificationTime(generation int, current row, path string) tea.Cmd {

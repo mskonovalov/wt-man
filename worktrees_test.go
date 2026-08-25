@@ -158,6 +158,36 @@ func TestModelUsesFullRepositoryNameWidth(t *testing.T) {
 	}
 }
 
+func TestModelUsesFullBranchWidthBeforePath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	branch := "feature/a-complete-descriptive-branch-name"
+	m := newModel([]repository{{
+		Name:      "example",
+		Worktrees: []worktree{{Path: "/tmp/worktree-path", Branch: branch}},
+	}})
+	m.width = 100
+
+	if m.branchWidth != len(branch) {
+		t.Fatalf("got branch width %d, want %d", m.branchWidth, len(branch))
+	}
+	if !strings.Contains(m.browseView(), branch) {
+		t.Fatal("full branch name was not rendered")
+	}
+	if m.pathColumnWidth() != 0 {
+		t.Fatal("path column should give way to the full branch on a narrow terminal")
+	}
+
+	m.width = 140
+	if m.pathColumnWidth() == 0 {
+		t.Fatal("path column was not restored on a wide terminal")
+	}
+
+	m.width = 60
+	if !m.compactRows() || !strings.Contains(m.browseView(), "Branch: "+branch) {
+		t.Fatal("narrow layout did not move the full branch onto its own line")
+	}
+}
+
 func TestModelShowsMissingWorktreeExplicitly(t *testing.T) {
 	m := newModel([]repository{{
 		Name: "example",
