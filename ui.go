@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -42,7 +41,9 @@ type deletionResult struct {
 	Err           error
 }
 
-type deletionFinishedMsg []deletionResult
+type deletionProgressMsg struct {
+	result deletionResult
+}
 
 type modificationTimeMsg struct {
 	generation int
@@ -67,6 +68,11 @@ type model struct {
 	repositoryWidth   int
 	sessionMode       sessionMode
 	modificationQueue []row
+	modificationTotal int
+	modificationDone  int
+	deletionQueue     []row
+	deletionTotal     int
+	deletionWaiting   bool
 	generation        int
 }
 
@@ -96,6 +102,7 @@ func newModel(repositories []repository) model {
 			}
 		}
 	}
+	m.modificationTotal = len(m.modificationQueue)
 	m.visible = append([]row(nil), m.rows...)
 	return m
 }
@@ -115,16 +122,25 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = message.Height
 		m.ensureCursorVisible()
 		return m, nil
-	case deletionFinishedMsg:
-		m.results = []deletionResult(message)
-		m.screen = resultsScreen
-		return m, nil
+	case deletionProgressMsg:
+		m.results = append(m.results, message.result)
+		m.deletionQueue = m.deletionQueue[1:]
+		if len(m.deletionQueue) == 0 {
+			m.screen = resultsScreen
+			return m, nil
+		}
+		return m, m.deleteNext()
 	case modificationTimeMsg:
 		if message.generation != m.generation {
 			return m, nil
 		}
 		m.repositories[message.row.repository].Worktrees[message.row.worktree].ModifiedAt = message.modifiedAt
 		m.modificationQueue = m.modificationQueue[1:]
+		m.modificationDone++
+		if m.screen == deletingScreen && m.deletionWaiting {
+			m.deletionWaiting = false
+			return m, m.deleteNext()
+		}
 		if len(m.modificationQueue) == 0 {
 			return m, nil
 		}
@@ -162,7 +178,14 @@ func (m model) updateKey(key string) (tea.Model, tea.Cmd) {
 			m.deleteBranches = !m.deleteBranches
 		case "D":
 			m.screen = deletingScreen
-			return m, deleteSelected(m.repositories, m.selectedRows(), m.deleteBranches)
+			m.results = nil
+			m.deletionQueue = m.selectedRows()
+			m.deletionTotal = len(m.deletionQueue)
+			if len(m.modificationQueue) > 0 {
+				m.deletionWaiting = true
+				return m, nil
+			}
+			return m, m.deleteNext()
 		}
 		return m, nil
 	}
@@ -286,10 +309,10 @@ func (m model) item(current row) worktree {
 }
 
 func (m model) pageSize() int {
-	if m.height < 12 {
+	if m.height < 13 {
 		return 1
 	}
-	return m.height - 11
+	return m.height - 12
 }
 
 func (m *model) ensureCursorVisible() {
@@ -308,6 +331,10 @@ func (m *model) ensureCursorVisible() {
 
 func (m model) queueModificationRefresh(rows []row) (tea.Model, tea.Cmd) {
 	wasIdle := len(m.modificationQueue) == 0
+	if wasIdle {
+		m.modificationTotal = 0
+		m.modificationDone = 0
+	}
 	queued := make(map[row]bool, len(m.modificationQueue))
 	for _, current := range m.modificationQueue {
 		queued[current] = true
@@ -319,6 +346,7 @@ func (m model) queueModificationRefresh(rows []row) (tea.Model, tea.Cmd) {
 		}
 		m.repositories[current.repository].Worktrees[current.worktree].ModifiedAt = time.Time{}
 		m.modificationQueue = append(m.modificationQueue, current)
+		m.modificationTotal++
 		queued[current] = true
 	}
 	if !wasIdle || len(m.modificationQueue) == 0 {
@@ -326,6 +354,15 @@ func (m model) queueModificationRefresh(rows []row) (tea.Model, tea.Cmd) {
 	}
 	current := m.modificationQueue[0]
 	return m, scanModificationTime(m.generation, current, m.item(current).Path)
+}
+
+func (m model) deleteNext() tea.Cmd {
+	current := m.deletionQueue[0]
+	repo := m.repositories[current.repository]
+	item := repo.Worktrees[current.worktree]
+	return func() tea.Msg {
+		return deletionProgressMsg{result: removeWorktree(context.Background(), repo, item, m.deleteBranches)}
+	}
 }
 
 func (m model) returnToList() (tea.Model, tea.Cmd) {
@@ -364,7 +401,7 @@ func (m model) View() tea.View {
 	case reviewScreen:
 		content = m.reviewView()
 	case deletingScreen:
-		content = "\nDeleting selected worktrees…\n"
+		content = m.deletingView()
 	case resultsScreen:
 		content = m.resultsView()
 	}
@@ -377,6 +414,8 @@ func (m model) browseView() string {
 	var output strings.Builder
 	fmt.Fprintf(&output, "\n\x1b[1mwt-man\x1b[0m  %d worktrees  %d selected  sessions: %s\n",
 		len(m.visible), len(m.selectedRows()), m.sessionMode.label())
+	output.WriteString(truncate(m.modificationProgressView(), m.width))
+	output.WriteByte('\n')
 	if m.filtering {
 		fmt.Fprintf(&output, "Filter: %s█\n\n", m.query)
 	} else if m.query != "" {
@@ -461,6 +500,19 @@ func scanModificationTime(generation int, current row, path string) tea.Cmd {
 	}
 }
 
+func (m model) modificationProgressView() string {
+	if len(m.modificationQueue) == 0 {
+		if m.modificationTotal == 0 {
+			return "Date scan: cache current"
+		}
+		return fmt.Sprintf("Date scan %s %d/%d complete",
+			progressBar(m.modificationDone, m.modificationTotal, 20), m.modificationDone, m.modificationTotal)
+	}
+	item := m.item(m.modificationQueue[0])
+	return fmt.Sprintf("Date scan %s %d/%d  %s",
+		progressBar(m.modificationDone, m.modificationTotal, 20), m.modificationDone, m.modificationTotal, item.Path)
+}
+
 func (mode sessionMode) label() string {
 	switch mode {
 	case withUnarchivedSessions:
@@ -506,6 +558,24 @@ func (m model) reviewView() string {
 	return output.String()
 }
 
+func (m model) deletingView() string {
+	completed := m.deletionTotal - len(m.deletionQueue)
+	var output strings.Builder
+	output.WriteString("\n\x1b[1mDeleting selected worktrees\x1b[0m\n\n")
+	fmt.Fprintf(&output, "%s %d/%d\n", progressBar(completed, m.deletionTotal, 30), completed, m.deletionTotal)
+	if m.deletionWaiting {
+		item := m.item(m.modificationQueue[0])
+		output.WriteString("\nFinishing the active date scan before deletion:\n")
+		output.WriteString(truncate(item.Path, m.width))
+	} else if len(m.deletionQueue) > 0 {
+		item := m.item(m.deletionQueue[0])
+		output.WriteString("\nDeleting:\n")
+		output.WriteString(truncate(item.Path, m.width))
+	}
+	output.WriteByte('\n')
+	return output.String()
+}
+
 func (m model) resultsView() string {
 	var output strings.Builder
 	output.WriteString("\n\x1b[1mDeletion results\x1b[0m\n\n")
@@ -529,17 +599,12 @@ func (m model) resultsView() string {
 	return output.String()
 }
 
-func deleteSelected(repositories []repository, selected []row, deleteBranches bool) tea.Cmd {
-	return func() tea.Msg {
-		results := make([]deletionResult, 0, len(selected))
-		for _, current := range selected {
-			repo := repositories[current.repository]
-			item := repo.Worktrees[current.worktree]
-			results = append(results, removeWorktree(context.Background(), repo, item, deleteBranches))
-		}
-		sort.SliceStable(results, func(i, j int) bool { return results[i].Path < results[j].Path })
-		return deletionFinishedMsg(results)
+func progressBar(completed, total, width int) string {
+	filled := 0
+	if total > 0 {
+		filled = completed * width / total
 	}
+	return "[" + strings.Repeat("=", filled) + strings.Repeat(" ", width-filled) + "]"
 }
 
 func truncate(value string, width int) string {

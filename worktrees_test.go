@@ -243,6 +243,45 @@ func TestEnterAfterDeletionReturnsToUpdatedList(t *testing.T) {
 	}
 }
 
+func TestDeletionWaitsForScanAndReportsEachWorktree(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := newModel([]repository{{
+		Name: "example",
+		Worktrees: []worktree{
+			{Path: "/tmp/one"},
+			{Path: "/tmp/two"},
+		},
+	}})
+	m.selected["/tmp/one"] = true
+	m.selected["/tmp/two"] = true
+	m.screen = reviewScreen
+
+	updated, command := m.updateKey("D")
+	m = updated.(model)
+	if command != nil || !m.deletionWaiting || !strings.Contains(m.deletingView(), "Finishing the active date scan") {
+		t.Fatal("deletion did not wait visibly for the active date scan")
+	}
+
+	scan := m.modificationQueue[0]
+	updated, command = m.Update(modificationTimeMsg{generation: m.generation, row: scan})
+	m = updated.(model)
+	if command == nil || m.deletionWaiting || len(m.deletionQueue) != 2 {
+		t.Fatal("first sequential deletion was not started")
+	}
+
+	updated, command = m.Update(deletionProgressMsg{result: deletionResult{Path: "/tmp/one", Removed: true}})
+	m = updated.(model)
+	if command == nil || len(m.deletionQueue) != 1 || !strings.Contains(m.deletingView(), "1/2") {
+		t.Fatal("second sequential deletion was not started with updated progress")
+	}
+
+	updated, command = m.Update(deletionProgressMsg{result: deletionResult{Path: "/tmp/two", Removed: true}})
+	m = updated.(model)
+	if command != nil || m.screen != resultsScreen || len(m.results) != 2 {
+		t.Fatal("sequential deletion did not finish on the results screen")
+	}
+}
+
 func TestModelFiltersByUnarchivedSessions(t *testing.T) {
 	m := newModel([]repository{{
 		Name: "example",

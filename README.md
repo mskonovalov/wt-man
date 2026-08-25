@@ -41,5 +41,6 @@ Deletion uses git worktree remove --force --force. The review screen always appe
 For an existing worktree, deletion removes both its directory and Git's worktree record. `missing (prunable)` means the directory no longer exists but Git still has a stale record; deleting it removes only that record.
 
 The created column uses the worktree directory's filesystem birth time. The modified column is the newest filesystem modification time anywhere under the worktree; it is scanned in the background and does not follow symbolic links. Results are cached for 24 hours in the operating system's user cache directory.
+Date scans process one worktree at a time and show progress above the list. Deletion pauses further scans, removes one selected worktree at a time, and shows the current path and batch progress.
 
 Claude session status is read from Claude Desktop's local session JSON files. Codex status is read from its local SQLite state database when sqlite3 is available. These are internal formats, so session detection is best-effort.
