@@ -45,6 +45,7 @@ type deletionResult struct {
 type deletionFinishedMsg []deletionResult
 
 type modificationTimeMsg struct {
+	generation int
 	row        row
 	modifiedAt time.Time
 }
@@ -66,6 +67,7 @@ type model struct {
 	repositoryWidth   int
 	sessionMode       sessionMode
 	modificationQueue []row
+	generation        int
 }
 
 func newModel(repositories []repository) model {
@@ -103,7 +105,7 @@ func (m model) Init() tea.Cmd {
 		return nil
 	}
 	current := m.modificationQueue[0]
-	return scanModificationTime(current, m.item(current).Path)
+	return scanModificationTime(m.generation, current, m.item(current).Path)
 }
 
 func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
@@ -118,13 +120,16 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = resultsScreen
 		return m, nil
 	case modificationTimeMsg:
+		if message.generation != m.generation {
+			return m, nil
+		}
 		m.repositories[message.row.repository].Worktrees[message.row.worktree].ModifiedAt = message.modifiedAt
 		m.modificationQueue = m.modificationQueue[1:]
 		if len(m.modificationQueue) == 0 {
 			return m, nil
 		}
 		current := m.modificationQueue[0]
-		return m, scanModificationTime(current, m.item(current).Path)
+		return m, scanModificationTime(m.generation, current, m.item(current).Path)
 	case tea.KeyPressMsg:
 		if message.String() == "ctrl+c" {
 			return m, tea.Quit
@@ -139,8 +144,11 @@ func (m model) updateKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.screen == resultsScreen {
-		if key == "q" || key == "enter" || key == "esc" {
+		if key == "q" {
 			return m, tea.Quit
+		}
+		if key == "enter" || key == "esc" {
+			return m.returnToList()
 		}
 		return m, nil
 	}
@@ -317,7 +325,35 @@ func (m model) queueModificationRefresh(rows []row) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	current := m.modificationQueue[0]
-	return m, scanModificationTime(current, m.item(current).Path)
+	return m, scanModificationTime(m.generation, current, m.item(current).Path)
+}
+
+func (m model) returnToList() (tea.Model, tea.Cmd) {
+	removed := make(map[string]bool)
+	for _, result := range m.results {
+		removed[result.Path] = result.Removed
+	}
+	var repositories []repository
+	for _, repo := range m.repositories {
+		var worktrees []worktree
+		for _, item := range repo.Worktrees {
+			if !removed[item.Path] {
+				worktrees = append(worktrees, item)
+			}
+		}
+		if len(worktrees) > 0 {
+			repo.Worktrees = worktrees
+			repositories = append(repositories, repo)
+		}
+	}
+	refreshed := newModel(repositories)
+	refreshed.width = m.width
+	refreshed.height = m.height
+	refreshed.query = m.query
+	refreshed.sessionMode = m.sessionMode
+	refreshed.generation = m.generation + 1
+	refreshed.applyFilter()
+	return refreshed, refreshed.Init()
 }
 
 func (m model) View() tea.View {
@@ -417,11 +453,11 @@ func (m model) browseView() string {
 	return output.String()
 }
 
-func scanModificationTime(current row, path string) tea.Cmd {
+func scanModificationTime(generation int, current row, path string) tea.Cmd {
 	return func() tea.Msg {
 		modifiedAt := modificationTime(path)
 		writeModificationCacheEntry(path, modifiedAt)
-		return modificationTimeMsg{row: current, modifiedAt: modifiedAt}
+		return modificationTimeMsg{generation: generation, row: current, modifiedAt: modifiedAt}
 	}
 }
 
@@ -489,7 +525,7 @@ func (m model) resultsView() string {
 		}
 		output.WriteByte('\n')
 	}
-	output.WriteString("\nPress enter or q to exit.\n")
+	output.WriteString("\nPress enter to return to the list, or q to quit.\n")
 	return output.String()
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -212,6 +213,33 @@ func TestModelUsesModificationCacheAndQueuesRefresh(t *testing.T) {
 	m = updated.(model)
 	if command == nil || len(m.modificationQueue) != 1 || !m.item(m.rows[0]).ModifiedAt.IsZero() {
 		t.Fatal("forced refresh was not queued")
+	}
+}
+
+func TestEnterAfterDeletionReturnsToUpdatedList(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := newModel([]repository{{
+		Name: "example",
+		Worktrees: []worktree{
+			{Path: "/tmp/deleted"},
+			{Path: "/tmp/failed"},
+		},
+	}})
+	m.screen = resultsScreen
+	m.results = []deletionResult{
+		{Path: "/tmp/deleted", Removed: true},
+		{Path: "/tmp/failed", Err: errors.New("failed")},
+	}
+
+	updated, _ := m.updateKey("enter")
+	m = updated.(model)
+	if m.screen != browseScreen || len(m.rows) != 1 || m.item(m.rows[0]).Path != "/tmp/failed" {
+		t.Fatalf("unexpected refreshed list: %#v", m.repositories)
+	}
+
+	updated, _ = m.Update(modificationTimeMsg{generation: 0, row: row{repository: 99, worktree: 99}})
+	if updated.(model).generation != 1 {
+		t.Fatal("stale modification scan changed the refreshed model")
 	}
 }
 
