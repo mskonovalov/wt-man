@@ -448,14 +448,14 @@ func (m model) browseView() string {
 	compact := m.compactRows()
 	pathWidth := m.pathColumnWidth()
 	if compact {
-		fmt.Fprintf(&output, "      %-*s %-10s %-10s %s\n",
-			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS")
-	} else if pathWidth > 0 {
-		fmt.Fprintf(&output, "      %-*s %-10s %-10s %-8s %-*s %s\n",
-			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", m.branchWidth, "BRANCH", "PATH")
-	} else {
 		fmt.Fprintf(&output, "      %-*s %-10s %-10s %-8s %s\n",
-			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "BRANCH")
+			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "MERGED")
+	} else if pathWidth > 0 {
+		fmt.Fprintf(&output, "      %-*s %-10s %-10s %-8s %-6s %-*s %s\n",
+			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "MERGED", m.branchWidth, "BRANCH", "PATH")
+	} else {
+		fmt.Fprintf(&output, "      %-*s %-10s %-10s %-8s %-6s %s\n",
+			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "MERGED", "BRANCH")
 	}
 	for index := m.offset; index < end; index++ {
 		current := m.visible[index]
@@ -496,12 +496,21 @@ func (m model) browseView() string {
 			warning = " !"
 		}
 		sessions := fmt.Sprintf("C%d X%d%s", item.Sessions.Claude, item.Sessions.Codex, warning)
-		line := fmt.Sprintf("%s [%s] %-*s %-10s %-10s %-8s",
-			pointer, checked, m.repositoryWidth, repoName, created, modified, sessions)
+		merged := "n/a"
+		if item.MergeKnown {
+			merged = "no"
+			if item.Merged {
+				merged = "yes"
+			}
+		} else if item.Branch != "" {
+			merged = "?"
+		}
+		line := fmt.Sprintf("%s [%s] %-*s %-10s %-10s %-8s %-6s",
+			pointer, checked, m.repositoryWidth, repoName, created, modified, sessions, merged)
 		if compact {
 			output.WriteString(truncate(line, m.width))
 			output.WriteByte('\n')
-			output.WriteString("      Branch: " + branch)
+			output.WriteString("      Branch: " + branch + "  Merged: " + merged)
 		} else {
 			line += fmt.Sprintf(" %-*s", m.branchWidth, branch)
 			if pathWidth > 0 {
@@ -514,13 +523,23 @@ func (m model) browseView() string {
 	if len(m.visible) == 0 {
 		output.WriteString("No matching worktrees.\n")
 	} else {
-		item := m.item(m.visible[m.cursor])
+		current := m.visible[m.cursor]
+		repo := m.repositories[current.repository]
+		item := m.item(current)
 		output.WriteByte('\n')
 		output.WriteString(truncate("Path: "+item.Path, m.width))
 		output.WriteByte('\n')
 		branchDetails := "Branch: " + item.Branch
 		if item.Missing {
 			branchDetails += "  State: missing (prunable; Git record only)"
+		}
+		if item.MergeKnown {
+			branchDetails += "  Merged into " + repo.MergeTarget + ": "
+			if item.Merged {
+				branchDetails += "yes"
+			} else {
+				branchDetails += "no"
+			}
 		}
 		output.WriteString(truncate(branchDetails, m.width))
 		output.WriteByte('\n')
@@ -532,7 +551,7 @@ func (m model) pathColumnWidth() int {
 	if m.compactRows() {
 		return 0
 	}
-	width := m.width - 38 - m.repositoryWidth - m.branchWidth
+	width := m.width - 46 - m.repositoryWidth - m.branchWidth
 	if width < 12 {
 		return 0
 	}
@@ -540,7 +559,7 @@ func (m model) pathColumnWidth() int {
 }
 
 func (m model) compactRows() bool {
-	return 37+m.repositoryWidth+m.branchWidth > m.width
+	return 45+m.repositoryWidth+m.branchWidth > m.width
 }
 
 func scanModificationTime(generation int, current row, path string) tea.Cmd {

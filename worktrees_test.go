@@ -57,6 +57,9 @@ func TestDiscoverAndRemoveExistingAndMissingWorktrees(t *testing.T) {
 	if _, err := git(ctx, repoPath, "worktree", "add", "-b", "existing", existingPath); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := git(ctx, existingPath, "-c", "user.name=wt-man", "-c", "user.email=wt-man@example.com", "commit", "--allow-empty", "-m", "feature"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := git(ctx, repoPath, "worktree", "add", "-b", "missing", missingPath); err != nil {
 		t.Fatal(err)
 	}
@@ -71,9 +74,15 @@ func TestDiscoverAndRemoveExistingAndMissingWorktrees(t *testing.T) {
 	if len(repositories) != 1 || len(repositories[0].Worktrees) != 2 {
 		t.Fatalf("unexpected discovery result: %#v", repositories)
 	}
+	if repositories[0].MergeTarget != "main" {
+		t.Fatalf("got merge target %q, want main", repositories[0].MergeTarget)
+	}
 	for _, item := range repositories[0].Worktrees {
 		if item.Path == missingPath && !item.Missing {
 			t.Fatal("missing worktree was not marked missing")
+		}
+		if !item.MergeKnown || item.Merged != (item.Branch == "missing") {
+			t.Fatalf("unexpected merged status: %#v", item)
 		}
 		result := removeWorktree(ctx, repositories[0], item, false)
 		if result.Err != nil {
@@ -185,6 +194,25 @@ func TestModelUsesFullBranchWidthBeforePath(t *testing.T) {
 	m.width = 60
 	if !m.compactRows() || !strings.Contains(m.browseView(), "Branch: "+branch) {
 		t.Fatal("narrow layout did not move the full branch onto its own line")
+	}
+}
+
+func TestModelShowsMergeTargetAndStatus(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := newModel([]repository{{
+		Name:        "example",
+		MergeTarget: "origin/main",
+		Worktrees: []worktree{{
+			Path:       "/tmp/merged",
+			Branch:     "feature/merged",
+			MergeKnown: true,
+			Merged:     true,
+		}},
+	}})
+
+	view := m.browseView()
+	if !strings.Contains(view, "MERGED") || !strings.Contains(view, "Merged into origin/main: yes") {
+		t.Fatalf("merge status was not rendered: %q", view)
 	}
 }
 

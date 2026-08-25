@@ -38,15 +38,18 @@ type worktree struct {
 	Locked     bool
 	Prunable   bool
 	Missing    bool
+	Merged     bool
+	MergeKnown bool
 	CreatedAt  time.Time
 	ModifiedAt time.Time
 	Sessions   sessionCounts
 }
 
 type repository struct {
-	Name      string
-	MainPath  string
-	Worktrees []worktree
+	Name        string
+	MainPath    string
+	MergeTarget string
+	Worktrees   []worktree
 }
 
 var ignoredDirectories = map[string]bool{
@@ -107,6 +110,7 @@ func discover(ctx context.Context, root string) ([]repository, error) {
 		if err != nil {
 			return nil, err
 		}
+		merged, mergeTarget := mergedBranches(ctx, gitRoot)
 
 		var linked []worktree
 		for _, item := range items {
@@ -119,6 +123,10 @@ func discover(ctx context.Context, root string) ([]repository, error) {
 			item.CreatedAt = creationTime(item.Path)
 			item.Sessions.Claude = len(claude[item.Path])
 			item.Sessions.Codex = codex[item.Path]
+			if item.Branch != "" && mergeTarget != "" {
+				item.Merged = merged[item.Branch]
+				item.MergeKnown = true
+			}
 			linked = append(linked, item)
 		}
 		if len(linked) == 0 {
@@ -135,13 +143,39 @@ func discover(ctx context.Context, root string) ([]repository, error) {
 			return left.Before(right)
 		})
 		repositories = append(repositories, repository{
-			Name: filepath.Base(mainPath), MainPath: mainPath, Worktrees: linked,
+			Name: filepath.Base(mainPath), MainPath: mainPath, MergeTarget: mergeTarget, Worktrees: linked,
 		})
 	}
 	sort.Slice(repositories, func(i, j int) bool {
 		return repositories[i].Name < repositories[j].Name
 	})
 	return repositories, nil
+}
+
+func mergedBranches(ctx context.Context, directory string) (map[string]bool, string) {
+	target, err := git(ctx, directory, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+	if err != nil {
+		for _, candidate := range []string{"origin/main", "origin/master", "main", "master"} {
+			if _, candidateErr := git(ctx, directory, "rev-parse", "--verify", "--quiet", candidate+"^{commit}"); candidateErr == nil {
+				target = candidate
+				break
+			}
+		}
+	}
+	merged := make(map[string]bool)
+	if target == "" {
+		return merged, ""
+	}
+	output, err := git(ctx, directory, "for-each-ref", "--format=%(refname:short)", "--merged="+target, "refs/heads")
+	if err != nil {
+		return merged, ""
+	}
+	for _, branch := range strings.Split(output, "\n") {
+		if branch != "" {
+			merged[branch] = true
+		}
+	}
+	return merged, target
 }
 
 func findGitRoots(root string) ([]string, error) {
