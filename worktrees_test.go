@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -31,6 +34,59 @@ func TestParseWorktrees(t *testing.T) {
 	}
 	if !items[2].Detached || !items[2].Prunable {
 		t.Fatalf("unexpected detached worktree: %#v", items[2])
+	}
+}
+
+func TestDiscoverAndRemoveExistingAndMissingWorktrees(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repoPath := filepath.Join(root, "repo")
+	existingPath := filepath.Join(root, "existing")
+	missingPath := filepath.Join(root, "missing")
+	if err := os.Mkdir(repoPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "init", "-b", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "-c", "user.name=wt-man", "-c", "user.email=wt-man@example.com", "commit", "--allow-empty", "-m", "initial"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "worktree", "add", "-b", "existing", existingPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "worktree", "add", "-b", "missing", missingPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(missingPath); err != nil {
+		t.Fatal(err)
+	}
+
+	repositories, err := discover(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repositories) != 1 || len(repositories[0].Worktrees) != 2 {
+		t.Fatalf("unexpected discovery result: %#v", repositories)
+	}
+	for _, item := range repositories[0].Worktrees {
+		if item.Path == missingPath && !item.Missing {
+			t.Fatal("missing worktree was not marked missing")
+		}
+		result := removeWorktree(ctx, repositories[0], item, false)
+		if result.Err != nil {
+			t.Fatal(result.Err)
+		}
+	}
+	if _, err := os.Stat(existingPath); !os.IsNotExist(err) {
+		t.Fatalf("existing worktree directory still exists: %v", err)
+	}
+	output, err := git(ctx, repoPath, "worktree", "list", "--porcelain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output, existingPath) || strings.Contains(output, missingPath) {
+		t.Fatalf("worktree records still exist: %s", output)
 	}
 }
 
@@ -64,6 +120,22 @@ func TestModelUsesFullRepositoryNameWidth(t *testing.T) {
 	}
 	if !strings.Contains(m.browseView(), "a-much-longer-repository") {
 		t.Fatal("full repository name was not rendered")
+	}
+}
+
+func TestModelShowsMissingWorktreeExplicitly(t *testing.T) {
+	m := newModel([]repository{{
+		Name: "example",
+		Worktrees: []worktree{{
+			Path:     "/tmp/missing",
+			Missing:  true,
+			Prunable: true,
+		}},
+	}})
+
+	view := m.browseView()
+	if !strings.Contains(view, "missing") || !strings.Contains(view, "missing (prunable; Git record only)") {
+		t.Fatalf("missing worktree state was not rendered: %q", view)
 	}
 }
 

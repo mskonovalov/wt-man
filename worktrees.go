@@ -28,6 +28,7 @@ type worktree struct {
 	Detached  bool
 	Locked    bool
 	Prunable  bool
+	Missing   bool
 	CreatedAt time.Time
 	Sessions  sessionCounts
 }
@@ -103,6 +104,8 @@ func discover(ctx context.Context, root string) ([]repository, error) {
 			if item.Path == mainPath {
 				continue
 			}
+			_, statErr := os.Stat(item.Path)
+			item.Missing = errors.Is(statErr, fs.ErrNotExist)
 			item.CreatedAt = creationTime(item.Path)
 			item.Sessions.Claude = len(claude[item.Path])
 			item.Sessions.Codex = codex[item.Path]
@@ -271,7 +274,7 @@ func readCodexSessions(ctx context.Context) map[string]int {
 }
 
 func removeWorktree(ctx context.Context, repo repository, item worktree, deleteBranch bool) deletionResult {
-	result := deletionResult{Path: item.Path, Branch: item.Branch}
+	result := deletionResult{Path: item.Path, Branch: item.Branch, Missing: item.Missing}
 	if _, err := git(ctx, repo.MainPath, "worktree", "remove", "--force", "--force", item.Path); err != nil {
 		result.Err = err
 		return result

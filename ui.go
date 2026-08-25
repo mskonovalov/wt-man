@@ -35,6 +35,7 @@ type row struct {
 type deletionResult struct {
 	Path          string
 	Branch        string
+	Missing       bool
 	Removed       bool
 	BranchDeleted bool
 	Err           error
@@ -310,7 +311,9 @@ func (m model) browseView() string {
 			repoName = ""
 		}
 		created := "unknown"
-		if !item.CreatedAt.IsZero() {
+		if item.Missing {
+			created = "missing"
+		} else if !item.CreatedAt.IsZero() {
 			created = item.CreatedAt.Format("2006-01-02")
 		}
 		branch := item.Branch
@@ -335,7 +338,11 @@ func (m model) browseView() string {
 		output.WriteByte('\n')
 		output.WriteString(truncate("Path: "+item.Path, m.width))
 		output.WriteByte('\n')
-		output.WriteString(truncate("Branch: "+item.Branch, m.width))
+		branchDetails := "Branch: " + item.Branch
+		if item.Missing {
+			branchDetails += "  State: missing (prunable; Git record only)"
+		}
+		output.WriteString(truncate(branchDetails, m.width))
 		output.WriteByte('\n')
 	}
 	return output.String()
@@ -368,6 +375,11 @@ func (m model) reviewView() string {
 		repo := m.repositories[current.repository]
 		item := repo.Worktrees[current.worktree]
 		fmt.Fprintf(&output, "  [%s] %s", repo.Name, item.Path)
+		if item.Missing {
+			output.WriteString("  \x1b[33mmissing: delete Git record only\x1b[0m")
+		} else {
+			output.WriteString("  delete files and Git record")
+		}
 		if item.Sessions.Claude+item.Sessions.Codex > 0 {
 			fmt.Fprintf(&output, "  \x1b[33mClaude %d, Codex %d unarchived\x1b[0m", item.Sessions.Claude, item.Sessions.Codex)
 		}
@@ -390,6 +402,11 @@ func (m model) resultsView() string {
 			continue
 		}
 		fmt.Fprintf(&output, "✓ %s", result.Path)
+		if result.Missing {
+			output.WriteString(" (deleted stale Git record)")
+		} else {
+			output.WriteString(" (deleted files and Git record)")
+		}
 		if result.BranchDeleted {
 			fmt.Fprintf(&output, " (deleted branch %s)", result.Branch)
 		}
