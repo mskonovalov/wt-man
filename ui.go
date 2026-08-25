@@ -69,6 +69,8 @@ type model struct {
 }
 
 func newModel(repositories []repository) model {
+	cache := readModificationCache()
+	cacheCutoff := time.Now().Add(-modificationCacheTTL)
 	m := model{
 		repositories: repositories,
 		selected:     make(map[string]bool),
@@ -83,7 +85,12 @@ func newModel(repositories []repository) model {
 			current := row{repository: repositoryIndex, worktree: worktreeIndex}
 			m.rows = append(m.rows, current)
 			if !repo.Worktrees[worktreeIndex].Missing {
-				m.modificationQueue = append(m.modificationQueue, current)
+				entry := cache[repo.Worktrees[worktreeIndex].Path]
+				if entry.ScannedAt.After(cacheCutoff) {
+					m.repositories[repositoryIndex].Worktrees[worktreeIndex].ModifiedAt = entry.ModifiedAt
+				} else {
+					m.modificationQueue = append(m.modificationQueue, current)
+				}
 			}
 		}
 	}
@@ -183,6 +190,13 @@ func (m model) updateKey(key string) (tea.Model, tea.Cmd) {
 	case "u":
 		m.sessionMode = (m.sessionMode + 1) % 3
 		m.applyFilter()
+	case "r":
+		if len(m.visible) > 0 {
+			current := m.visible[m.cursor]
+			return m.queueModificationRefresh([]row{current})
+		}
+	case "R":
+		return m.queueModificationRefresh(m.rows)
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
@@ -284,6 +298,28 @@ func (m *model) ensureCursorVisible() {
 	}
 }
 
+func (m model) queueModificationRefresh(rows []row) (tea.Model, tea.Cmd) {
+	wasIdle := len(m.modificationQueue) == 0
+	queued := make(map[row]bool, len(m.modificationQueue))
+	for _, current := range m.modificationQueue {
+		queued[current] = true
+	}
+	for _, current := range rows {
+		item := m.item(current)
+		if item.Missing || queued[current] {
+			continue
+		}
+		m.repositories[current.repository].Worktrees[current.worktree].ModifiedAt = time.Time{}
+		m.modificationQueue = append(m.modificationQueue, current)
+		queued[current] = true
+	}
+	if !wasIdle || len(m.modificationQueue) == 0 {
+		return m, nil
+	}
+	current := m.modificationQueue[0]
+	return m, scanModificationTime(current, m.item(current).Path)
+}
+
 func (m model) View() tea.View {
 	var content string
 	switch m.screen {
@@ -310,7 +346,7 @@ func (m model) browseView() string {
 	} else if m.query != "" {
 		fmt.Fprintf(&output, "Filter: %s  (/ to edit)\n\n", m.query)
 	} else {
-		output.WriteString("/ text filter  u session filter  space select  a all  enter review  q quit\n\n")
+		output.WriteString("/ filter  u sessions  r refresh  R refresh all  space select  a all  enter review  q quit\n\n")
 	}
 
 	end := m.offset + m.pageSize()
@@ -383,7 +419,9 @@ func (m model) browseView() string {
 
 func scanModificationTime(current row, path string) tea.Cmd {
 	return func() tea.Msg {
-		return modificationTimeMsg{row: current, modifiedAt: modificationTime(path)}
+		modifiedAt := modificationTime(path)
+		writeModificationCacheEntry(path, modifiedAt)
+		return modificationTimeMsg{row: current, modifiedAt: modifiedAt}
 	}
 }
 

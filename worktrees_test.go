@@ -174,6 +174,7 @@ func TestModelShowsMissingWorktreeExplicitly(t *testing.T) {
 }
 
 func TestModelShowsModificationScanProgressAndResult(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	m := newModel([]repository{{
 		Name:      "example",
 		Worktrees: []worktree{{Path: "/tmp/example"}},
@@ -187,6 +188,30 @@ func TestModelShowsModificationScanProgressAndResult(t *testing.T) {
 	m = updated.(model)
 	if !strings.Contains(m.browseView(), "2026-08-24") {
 		t.Fatal("modification date was not rendered")
+	}
+}
+
+func TestModelUsesModificationCacheAndQueuesRefresh(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := "/tmp/cached-worktree"
+	modified := time.Date(2026, 8, 23, 12, 0, 0, 0, time.Local)
+	writeModificationCacheEntry(path, modified)
+
+	m := newModel([]repository{{
+		Name:      "example",
+		Worktrees: []worktree{{Path: path}},
+	}})
+	if got := m.item(m.rows[0]).ModifiedAt; !got.Equal(modified) {
+		t.Fatalf("got cached modification time %s, want %s", got, modified)
+	}
+	if len(m.modificationQueue) != 0 {
+		t.Fatalf("fresh cache entry was queued for scanning: %#v", m.modificationQueue)
+	}
+
+	updated, command := m.updateKey("r")
+	m = updated.(model)
+	if command == nil || len(m.modificationQueue) != 1 || !m.item(m.rows[0]).ModifiedAt.IsZero() {
+		t.Fatal("forced refresh was not queued")
 	}
 }
 

@@ -24,6 +24,13 @@ type sessionCounts struct {
 	Codex  int
 }
 
+type modificationCacheEntry struct {
+	ModifiedAt time.Time `json:"modified_at"`
+	ScannedAt  time.Time `json:"scanned_at"`
+}
+
+const modificationCacheTTL = 24 * time.Hour
+
 type worktree struct {
 	Path       string
 	Branch     string
@@ -312,6 +319,54 @@ func modificationTime(path string) time.Time {
 		return nil
 	})
 	return latest
+}
+
+func readModificationCache() map[string]modificationCacheEntry {
+	cache := make(map[string]modificationCacheEntry)
+	directory, err := os.UserCacheDir()
+	if err != nil {
+		return cache
+	}
+	data, err := os.ReadFile(filepath.Join(directory, "wt-man", "modtimes.json"))
+	if err != nil {
+		return cache
+	}
+	_ = json.Unmarshal(data, &cache)
+	return cache
+}
+
+func writeModificationCacheEntry(path string, modifiedAt time.Time) {
+	directory, err := os.UserCacheDir()
+	if err != nil {
+		return
+	}
+	directory = filepath.Join(directory, "wt-man")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return
+	}
+	cache := readModificationCache()
+	cache[path] = modificationCacheEntry{ModifiedAt: modifiedAt, ScannedAt: time.Now()}
+	data, err := json.Marshal(cache)
+	if err != nil {
+		return
+	}
+	temporary, err := os.CreateTemp(directory, "modtimes-*.json")
+	if err != nil {
+		return
+	}
+	temporaryPath := temporary.Name()
+	if _, err := temporary.Write(data); err != nil {
+		_ = temporary.Close()
+		_ = os.Remove(temporaryPath)
+		return
+	}
+	if err := temporary.Close(); err != nil {
+		_ = os.Remove(temporaryPath)
+		return
+	}
+	if err := os.Rename(temporaryPath, filepath.Join(directory, "modtimes.json")); err != nil {
+		_ = os.Remove(temporaryPath)
+	}
 }
 
 func git(ctx context.Context, directory string, args ...string) (string, error) {
