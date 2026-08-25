@@ -1,0 +1,395 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"strings"
+	"unicode/utf8"
+
+	tea "charm.land/bubbletea/v2"
+)
+
+type screen int
+
+const (
+	browseScreen screen = iota
+	reviewScreen
+	deletingScreen
+	resultsScreen
+)
+
+type row struct {
+	repository int
+	worktree   int
+}
+
+type deletionResult struct {
+	Path          string
+	Branch        string
+	Removed       bool
+	BranchDeleted bool
+	Err           error
+}
+
+type deletionFinishedMsg []deletionResult
+
+type model struct {
+	repositories   []repository
+	rows           []row
+	visible        []row
+	selected       map[string]bool
+	cursor         int
+	offset         int
+	width          int
+	height         int
+	query          string
+	filtering      bool
+	screen         screen
+	deleteBranches bool
+	results        []deletionResult
+}
+
+func newModel(repositories []repository) model {
+	m := model{
+		repositories: repositories,
+		selected:     make(map[string]bool),
+		height:       24,
+		width:        100,
+	}
+	for repositoryIndex, repo := range repositories {
+		for worktreeIndex := range repo.Worktrees {
+			m.rows = append(m.rows, row{repository: repositoryIndex, worktree: worktreeIndex})
+		}
+	}
+	m.visible = append([]row(nil), m.rows...)
+	return m
+}
+
+func (m model) Init() tea.Cmd {
+	return nil
+}
+
+func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	switch message := message.(type) {
+	case tea.WindowSizeMsg:
+		m.width = message.Width
+		m.height = message.Height
+		m.ensureCursorVisible()
+		return m, nil
+	case deletionFinishedMsg:
+		m.results = []deletionResult(message)
+		m.screen = resultsScreen
+		return m, nil
+	case tea.KeyPressMsg:
+		if message.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m.updateKey(message.String())
+	}
+	return m, nil
+}
+
+func (m model) updateKey(key string) (tea.Model, tea.Cmd) {
+	if m.screen == deletingScreen {
+		return m, nil
+	}
+	if m.screen == resultsScreen {
+		if key == "q" || key == "enter" || key == "esc" {
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+	if m.screen == reviewScreen {
+		switch key {
+		case "q":
+			return m, tea.Quit
+		case "b", "esc":
+			m.screen = browseScreen
+		case "x":
+			m.deleteBranches = !m.deleteBranches
+		case "D":
+			m.screen = deletingScreen
+			return m, deleteSelected(m.repositories, m.selectedRows(), m.deleteBranches)
+		}
+		return m, nil
+	}
+
+	if m.filtering {
+		switch key {
+		case "enter":
+			m.filtering = false
+		case "esc":
+			m.filtering = false
+			m.query = ""
+			m.applyFilter()
+		case "backspace", "ctrl+h":
+			if m.query != "" {
+				_, size := utf8.DecodeLastRuneInString(m.query)
+				m.query = m.query[:len(m.query)-size]
+				m.applyFilter()
+			}
+		default:
+			if len([]rune(key)) == 1 {
+				m.query += key
+				m.applyFilter()
+			}
+		}
+		return m, nil
+	}
+
+	switch key {
+	case "q":
+		return m, tea.Quit
+	case "/":
+		m.filtering = true
+	case "up", "k":
+		if m.cursor > 0 {
+			m.cursor--
+		}
+	case "down", "j":
+		if m.cursor < len(m.visible)-1 {
+			m.cursor++
+		}
+	case "pgup":
+		m.cursor -= m.pageSize()
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+	case "pgdown":
+		m.cursor += m.pageSize()
+		if m.cursor >= len(m.visible) {
+			m.cursor = len(m.visible) - 1
+		}
+	case "space":
+		if len(m.visible) > 0 {
+			path := m.item(m.visible[m.cursor]).Path
+			m.selected[path] = !m.selected[path]
+		}
+	case "a":
+		m.toggleAllVisible()
+	case "enter":
+		if len(m.selectedRows()) > 0 {
+			m.screen = reviewScreen
+		}
+	}
+	m.ensureCursorVisible()
+	return m, nil
+}
+
+func (m *model) applyFilter() {
+	query := strings.ToLower(m.query)
+	m.visible = m.visible[:0]
+	for _, current := range m.rows {
+		repo := m.repositories[current.repository]
+		item := repo.Worktrees[current.worktree]
+		haystack := strings.ToLower(repo.Name + " " + item.Branch + " " + item.Path)
+		if strings.Contains(haystack, query) {
+			m.visible = append(m.visible, current)
+		}
+	}
+	m.cursor = 0
+	m.offset = 0
+}
+
+func (m *model) toggleAllVisible() {
+	allSelected := len(m.visible) > 0
+	for _, current := range m.visible {
+		if !m.selected[m.item(current).Path] {
+			allSelected = false
+			break
+		}
+	}
+	for _, current := range m.visible {
+		m.selected[m.item(current).Path] = !allSelected
+	}
+}
+
+func (m model) selectedRows() []row {
+	var selected []row
+	for _, current := range m.rows {
+		if m.selected[m.item(current).Path] {
+			selected = append(selected, current)
+		}
+	}
+	return selected
+}
+
+func (m model) item(current row) worktree {
+	return m.repositories[current.repository].Worktrees[current.worktree]
+}
+
+func (m model) pageSize() int {
+	if m.height < 11 {
+		return 1
+	}
+	return m.height - 10
+}
+
+func (m *model) ensureCursorVisible() {
+	if len(m.visible) == 0 {
+		m.cursor = 0
+		m.offset = 0
+		return
+	}
+	if m.cursor < m.offset {
+		m.offset = m.cursor
+	}
+	if m.cursor >= m.offset+m.pageSize() {
+		m.offset = m.cursor - m.pageSize() + 1
+	}
+}
+
+func (m model) View() tea.View {
+	var content string
+	switch m.screen {
+	case browseScreen:
+		content = m.browseView()
+	case reviewScreen:
+		content = m.reviewView()
+	case deletingScreen:
+		content = "\nDeleting selected worktrees…\n"
+	case resultsScreen:
+		content = m.resultsView()
+	}
+	view := tea.NewView(content)
+	view.AltScreen = true
+	return view
+}
+
+func (m model) browseView() string {
+	var output strings.Builder
+	fmt.Fprintf(&output, "\n\x1b[1mwt-man\x1b[0m  %d worktrees  %d selected\n", len(m.visible), len(m.selectedRows()))
+	if m.filtering {
+		fmt.Fprintf(&output, "Filter: %s█\n\n", m.query)
+	} else if m.query != "" {
+		fmt.Fprintf(&output, "Filter: %s  (/ to edit)\n\n", m.query)
+	} else {
+		output.WriteString("/ filter  space select  a all  enter review  q quit\n\n")
+	}
+
+	end := m.offset + m.pageSize()
+	if end > len(m.visible) {
+		end = len(m.visible)
+	}
+	for index := m.offset; index < end; index++ {
+		current := m.visible[index]
+		repo := m.repositories[current.repository]
+		item := repo.Worktrees[current.worktree]
+		pointer := " "
+		if index == m.cursor {
+			pointer = "›"
+		}
+		checked := " "
+		if m.selected[item.Path] {
+			checked = "x"
+		}
+		repoName := repo.Name
+		if index > m.offset && m.visible[index-1].repository == current.repository {
+			repoName = ""
+		}
+		created := "unknown"
+		if !item.CreatedAt.IsZero() {
+			created = item.CreatedAt.Format("2006-01-02")
+		}
+		branch := item.Branch
+		if branch == "" {
+			branch = "detached"
+		}
+		warning := ""
+		if item.Sessions.Claude+item.Sessions.Codex > 0 {
+			warning = " !"
+		}
+		line := fmt.Sprintf("%s [%s] %-12s %-10s C%d X%d%s  %-16s %s",
+			pointer, checked, truncate(repoName, 12), created,
+			item.Sessions.Claude, item.Sessions.Codex, warning,
+			truncate(branch, 16), item.Path)
+		output.WriteString(truncate(line, m.width))
+		output.WriteByte('\n')
+	}
+	if len(m.visible) == 0 {
+		output.WriteString("No matching worktrees.\n")
+	} else {
+		item := m.item(m.visible[m.cursor])
+		output.WriteByte('\n')
+		output.WriteString(truncate("Path: "+item.Path, m.width))
+		output.WriteByte('\n')
+		output.WriteString(truncate("Branch: "+item.Branch, m.width))
+		output.WriteByte('\n')
+	}
+	return output.String()
+}
+
+func (m model) reviewView() string {
+	selected := m.selectedRows()
+	var output strings.Builder
+	fmt.Fprintf(&output, "\n\x1b[1mReview %d worktrees\x1b[0m\n\n", len(selected))
+	limit := m.height - 8
+	if limit < 1 {
+		limit = 1
+	}
+	for index, current := range selected {
+		if index >= limit {
+			fmt.Fprintf(&output, "  … and %d more\n", len(selected)-index)
+			break
+		}
+		repo := m.repositories[current.repository]
+		item := repo.Worktrees[current.worktree]
+		fmt.Fprintf(&output, "  [%s] %s", repo.Name, item.Path)
+		if item.Sessions.Claude+item.Sessions.Codex > 0 {
+			fmt.Fprintf(&output, "  \x1b[33mClaude %d, Codex %d unarchived\x1b[0m", item.Sessions.Claude, item.Sessions.Codex)
+		}
+		output.WriteByte('\n')
+	}
+	branches := "keep local branches"
+	if m.deleteBranches {
+		branches = "DELETE local branches"
+	}
+	fmt.Fprintf(&output, "\n[x] %s\n[b] back  [D] delete permanently  [q] quit\n", branches)
+	return output.String()
+}
+
+func (m model) resultsView() string {
+	var output strings.Builder
+	output.WriteString("\n\x1b[1mDeletion results\x1b[0m\n\n")
+	for _, result := range m.results {
+		if result.Err != nil {
+			fmt.Fprintf(&output, "✗ %s: %v\n", result.Path, result.Err)
+			continue
+		}
+		fmt.Fprintf(&output, "✓ %s", result.Path)
+		if result.BranchDeleted {
+			fmt.Fprintf(&output, " (deleted branch %s)", result.Branch)
+		}
+		output.WriteByte('\n')
+	}
+	output.WriteString("\nPress enter or q to exit.\n")
+	return output.String()
+}
+
+func deleteSelected(repositories []repository, selected []row, deleteBranches bool) tea.Cmd {
+	return func() tea.Msg {
+		results := make([]deletionResult, 0, len(selected))
+		for _, current := range selected {
+			repo := repositories[current.repository]
+			item := repo.Worktrees[current.worktree]
+			results = append(results, removeWorktree(context.Background(), repo, item, deleteBranches))
+		}
+		sort.SliceStable(results, func(i, j int) bool { return results[i].Path < results[j].Path })
+		return deletionFinishedMsg(results)
+	}
+}
+
+func truncate(value string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= width {
+		return value
+	}
+	if width == 1 {
+		return "…"
+	}
+	return string(runes[:width-1]) + "…"
+}
