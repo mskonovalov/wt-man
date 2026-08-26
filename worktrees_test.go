@@ -31,11 +31,26 @@ func TestParseWorktrees(t *testing.T) {
 	if len(items) != 3 {
 		t.Fatalf("got %d worktrees, want 3", len(items))
 	}
-	if items[1].Branch != "feature/test" || !items[1].Locked {
+	if items[1].Head != "def456" || items[1].Branch != "feature/test" || !items[1].Locked {
 		t.Fatalf("unexpected linked worktree: %#v", items[1])
 	}
 	if !items[2].Detached || !items[2].Prunable {
 		t.Fatalf("unexpected detached worktree: %#v", items[2])
+	}
+}
+
+func TestGitHubRepositoryFromOrigin(t *testing.T) {
+	ctx := context.Background()
+	repoPath := t.TempDir()
+	if _, err := git(ctx, repoPath, "init"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "remote", "add", "origin", "git@github.com:example/wt-man.git"); err != nil {
+		t.Fatal(err)
+	}
+	owner, name, ok := githubRepository(ctx, repoPath)
+	if !ok || owner != "example" || name != "wt-man" {
+		t.Fatalf("unexpected GitHub repository: %q/%q, %v", owner, name, ok)
 	}
 }
 

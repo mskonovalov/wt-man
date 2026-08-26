@@ -540,6 +540,9 @@ func (m model) browseView() string {
 			} else {
 				branchDetails += "no"
 			}
+			if item.MergeSource != "" {
+				branchDetails += " (" + item.MergeSource + ")"
+			}
 		}
 		output.WriteString(truncate(branchDetails, m.width))
 		output.WriteByte('\n')

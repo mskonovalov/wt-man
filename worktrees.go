@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/charlievieth/fastwalk"
+	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/cli/go-gh/v2/pkg/auth"
 )
 
 type sessionCounts struct {
@@ -32,17 +34,19 @@ type modificationCacheEntry struct {
 const modificationCacheTTL = 24 * time.Hour
 
 type worktree struct {
-	Path       string
-	Branch     string
-	Detached   bool
-	Locked     bool
-	Prunable   bool
-	Missing    bool
-	Merged     bool
-	MergeKnown bool
-	CreatedAt  time.Time
-	ModifiedAt time.Time
-	Sessions   sessionCounts
+	Path        string
+	Branch      string
+	Head        string
+	Detached    bool
+	Locked      bool
+	Prunable    bool
+	Missing     bool
+	Merged      bool
+	MergeKnown  bool
+	MergeSource string
+	CreatedAt   time.Time
+	ModifiedAt  time.Time
+	Sessions    sessionCounts
 }
 
 type repository struct {
@@ -126,6 +130,7 @@ func discover(ctx context.Context, root string) ([]repository, error) {
 			if item.Branch != "" && mergeTarget != "" {
 				item.Merged = merged[item.Branch]
 				item.MergeKnown = true
+				item.MergeSource = "Git"
 			}
 			linked = append(linked, item)
 		}
@@ -149,6 +154,7 @@ func discover(ctx context.Context, root string) ([]repository, error) {
 	sort.Slice(repositories, func(i, j int) bool {
 		return repositories[i].Name < repositories[j].Name
 	})
+	overlayGitHubMerged(ctx, repositories)
 	return repositories, nil
 }
 
@@ -176,6 +182,105 @@ func mergedBranches(ctx context.Context, directory string) (map[string]bool, str
 		}
 	}
 	return merged, target
+}
+
+func overlayGitHubMerged(ctx context.Context, repositories []repository) {
+	type repositoryQuery struct {
+		rows map[string]row
+	}
+	queries := make(map[string]repositoryQuery)
+	var query strings.Builder
+	query.WriteString("query {")
+	for repositoryIndex, repo := range repositories {
+		owner, name, ok := githubRepository(ctx, repo.MainPath)
+		if !ok {
+			continue
+		}
+		repositoryAlias := fmt.Sprintf("r%d", repositoryIndex)
+		current := repositoryQuery{rows: make(map[string]row)}
+		var commitsQuery strings.Builder
+		for worktreeIndex, item := range repo.Worktrees {
+			if item.Branch == "" || item.Head == "" {
+				continue
+			}
+			commitAlias := fmt.Sprintf("c%d", worktreeIndex)
+			current.rows[commitAlias] = row{repository: repositoryIndex, worktree: worktreeIndex}
+			fmt.Fprintf(&commitsQuery, "%s: object(oid:%q) { ... on Commit { associatedPullRequests(first:10) { nodes { mergedAt baseRefName headRefName headRefOid } } } }", commitAlias, item.Head)
+		}
+		if len(current.rows) > 0 {
+			fmt.Fprintf(&query, "%s: repository(owner:%q,name:%q) {%s}", repositoryAlias, owner, name, commitsQuery.String())
+			queries[repositoryAlias] = current
+		}
+	}
+	query.WriteString("}")
+	if len(queries) == 0 {
+		return
+	}
+	token, _ := auth.TokenForHost("github.com")
+	if token == "" {
+		return
+	}
+	client, err := api.NewGraphQLClient(api.ClientOptions{Host: "github.com", AuthToken: token})
+	if err != nil {
+		return
+	}
+
+	apiContext, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	response := make(map[string]json.RawMessage)
+	if client.DoWithContext(apiContext, query.String(), nil, &response) != nil {
+		return
+	}
+	for repositoryAlias, repositoryQuery := range queries {
+		var commits map[string]struct {
+			AssociatedPullRequests struct {
+				Nodes []struct {
+					MergedAt    *time.Time `json:"mergedAt"`
+					BaseRefName string     `json:"baseRefName"`
+					HeadRefName string     `json:"headRefName"`
+					HeadRefOID  string     `json:"headRefOid"`
+				} `json:"nodes"`
+			} `json:"associatedPullRequests"`
+		}
+		if json.Unmarshal(response[repositoryAlias], &commits) != nil {
+			continue
+		}
+		for commitAlias, current := range repositoryQuery.rows {
+			item := &repositories[current.repository].Worktrees[current.worktree]
+			base := strings.TrimPrefix(repositories[current.repository].MergeTarget, "origin/")
+			for _, pullRequest := range commits[commitAlias].AssociatedPullRequests.Nodes {
+				if pullRequest.MergedAt != nil && pullRequest.BaseRefName == base && pullRequest.HeadRefName == item.Branch && pullRequest.HeadRefOID == item.Head {
+					item.Merged = true
+					item.MergeKnown = true
+					item.MergeSource = "GitHub"
+					break
+				}
+			}
+		}
+	}
+}
+
+func githubRepository(ctx context.Context, directory string) (string, string, bool) {
+	remote, err := git(ctx, directory, "remote", "get-url", "origin")
+	if err != nil {
+		return "", "", false
+	}
+	var path string
+	for _, prefix := range []string{"git@github.com:", "https://github.com/", "http://github.com/", "ssh://git@github.com/"} {
+		if strings.HasPrefix(remote, prefix) {
+			path = strings.TrimPrefix(remote, prefix)
+			break
+		}
+	}
+	if path == "" {
+		return "", "", false
+	}
+	path = strings.TrimSuffix(path, ".git")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }
 
 func findGitRoots(root string) ([]string, error) {
@@ -229,6 +334,8 @@ func parseWorktrees(output string) ([]worktree, error) {
 			return nil, fmt.Errorf("invalid git worktree output: %q", line)
 		}
 		switch {
+		case strings.HasPrefix(line, "HEAD "):
+			current.Head = strings.TrimPrefix(line, "HEAD ")
 		case strings.HasPrefix(line, "branch refs/heads/"):
 			current.Branch = strings.TrimPrefix(line, "branch refs/heads/")
 		case line == "detached":
