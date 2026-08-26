@@ -87,16 +87,24 @@ func TestDiscoverAndRemoveExistingAndMissingWorktrees(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	repositories, _, err := discover(ctx, root)
+	repositories, err := discover(ctx, root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(repositories) != 1 || len(repositories[0].Worktrees) != 2 {
 		t.Fatalf("unexpected discovery result: %#v", repositories)
 	}
-	if repositories[0].MergeTarget != "main" {
-		t.Fatalf("got merge target %q, want main", repositories[0].MergeTarget)
+	if repositories[0].MergeTarget != "" || repositories[0].Worktrees[0].MergeKnown {
+		t.Fatalf("merge status blocked initial discovery: %#v", repositories[0])
 	}
+	m := newModel(repositories)
+	message := scanMergeStatus(m.generation, 0, repositories[0].MainPath)()
+	updated, command := m.Update(message)
+	m = updated.(model)
+	if command == nil || m.repositories[0].MergeTarget != "main" {
+		t.Fatalf("background merge scan did not finish correctly: %#v", m.repositories[0])
+	}
+	repositories = m.repositories
 	for _, item := range repositories[0].Worktrees {
 		if item.Path == missingPath && !item.Missing {
 			t.Fatal("missing worktree was not marked missing")
@@ -143,7 +151,7 @@ func TestDiscoverUsesBareRepositoryAsPrimaryPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	repositories, _, err := discover(ctx, root)
+	repositories, err := discover(ctx, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,8 +180,7 @@ func TestDiscoverUsesWorktreePathWithSeparateGitDirectory(t *testing.T) {
 	if _, err := git(ctx, primaryPath, "worktree", "add", "-b", "linked", linkedPath); err != nil {
 		t.Fatal(err)
 	}
-
-	repositories, _, err := discover(ctx, root)
+	repositories, err := discover(ctx, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,11 +444,35 @@ func TestModelShowsMergeTargetAndStatus(t *testing.T) {
 	}
 }
 
+func TestGitHubMergeStatusUpdatesRows(t *testing.T) {
+	m := newModel([]repository{{
+		Name: "example",
+		Worktrees: []worktree{{
+			Path:   "/tmp/merged",
+			Branch: "feature/merged",
+		}},
+	}})
+	m.githubMergePending = true
+
+	updated, _ := m.Update(githubMergeStatusMsg{
+		generation:    m.generation,
+		authenticated: true,
+		merged:        []row{{repository: 0, worktree: 0}},
+	})
+	m = updated.(model)
+	item := m.item(m.rows[0])
+	if m.githubMergePending || !m.githubAuthChecked || !m.githubAuthAvailable || !item.Merged || item.MergeSource != "GitHub" {
+		t.Fatalf("GitHub merge status was not applied: %#v, model=%#v", item, m)
+	}
+}
+
 func TestModelWarnsWhenGitHubAuthenticationIsUnavailable(t *testing.T) {
 	m := newModel([]repository{{
 		Name:      "example",
 		Worktrees: []worktree{{Path: "/tmp/example"}},
 	}})
+	m.githubMergePending = false
+	m.githubAuthChecked = true
 	m.githubAuthAvailable = false
 
 	if view := m.browseView(); !strings.Contains(view, "Warning: GitHub authentication unavailable") {

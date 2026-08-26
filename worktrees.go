@@ -64,10 +64,10 @@ var ignoredDirectories = map[string]bool{
 	".cache": true, ".yarn": true, "node_modules": true, "vendor": true,
 }
 
-func discover(ctx context.Context, root string) ([]repository, bool, error) {
+func discover(ctx context.Context, root string) ([]repository, error) {
 	root, err := canonicalPath(root)
 	if err != nil {
-		return nil, false, fmt.Errorf("resolve root: %w", err)
+		return nil, fmt.Errorf("resolve root: %w", err)
 	}
 
 	var gitRoots []string
@@ -92,11 +92,10 @@ func discover(ctx context.Context, root string) ([]repository, bool, error) {
 	}()
 	wait.Wait()
 	if rootsErr != nil {
-		return nil, false, rootsErr
+		return nil, rootsErr
 	}
 
 	seen := make(map[string]bool)
-	primaryPaths := findPrimaryWorktreePaths(ctx, gitRoots)
 	var repositories []repository
 	for _, gitRoot := range gitRoots {
 		commonDirectory, err := git(ctx, gitRoot, "rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -120,12 +119,10 @@ func discover(ctx context.Context, root string) ([]repository, bool, error) {
 		if err != nil || len(items) == 0 {
 			continue
 		}
-		primaryPath, err := primaryWorktreePath(commonDirectory, items, primaryPaths)
+		primaryPath, err := primaryWorktreePath(ctx, commonDirectory, items, gitRoots)
 		if err != nil {
 			continue
 		}
-		merged, mergeTarget := mergedBranches(ctx, primaryPath)
-
 		var linked []worktree
 		for index, item := range items {
 			item.Path, _ = canonicalPath(item.Path)
@@ -135,11 +132,6 @@ func discover(ctx context.Context, root string) ([]repository, bool, error) {
 			_, statErr := os.Stat(item.Path)
 			item.Missing = errors.Is(statErr, fs.ErrNotExist)
 			item.CreatedAt = creationTime(item.Path)
-			if item.Branch != "" && mergeTarget != "" {
-				item.Merged = merged[item.Branch]
-				item.MergeKnown = true
-				item.MergeSource = "Git"
-			}
 			linked = append(linked, item)
 		}
 		if len(linked) == 0 {
@@ -156,28 +148,22 @@ func discover(ctx context.Context, root string) ([]repository, bool, error) {
 			return left.Before(right)
 		})
 		repositories = append(repositories, repository{
-			Name: filepath.Base(primaryPath), MainPath: primaryPath, MergeTarget: mergeTarget, Worktrees: linked,
+			Name: filepath.Base(primaryPath), MainPath: primaryPath, Worktrees: linked,
 		})
 	}
 	sort.Slice(repositories, func(i, j int) bool {
 		return repositories[i].Name < repositories[j].Name
 	})
 	assignSessions(repositories, claude, codex, claudeKnown, codexKnown)
-	githubAuthenticated := overlayGitHubMerged(ctx, repositories)
-	return repositories, githubAuthenticated, nil
+	return repositories, nil
 }
 
-func findPrimaryWorktreePaths(ctx context.Context, gitRoots []string) map[string]string {
-	result := make(map[string]string)
+func primaryWorktreePath(ctx context.Context, commonDirectory string, items []worktree, gitRoots []string) (string, error) {
+	listedPath, err := canonicalPath(items[0].Path)
+	if err != nil || items[0].Bare || listedPath != commonDirectory {
+		return listedPath, err
+	}
 	for _, root := range gitRoots {
-		commonDirectory, err := git(ctx, root, "rev-parse", "--path-format=absolute", "--git-common-dir")
-		if err != nil {
-			continue
-		}
-		commonDirectory, err = canonicalPath(commonDirectory)
-		if err != nil {
-			continue
-		}
 		gitDirectory, err := git(ctx, root, "rev-parse", "--absolute-git-dir")
 		if err != nil {
 			continue
@@ -190,21 +176,9 @@ func findPrimaryWorktreePaths(ctx context.Context, gitRoots []string) map[string
 		if err != nil {
 			continue
 		}
-		if topLevel, err = canonicalPath(topLevel); err == nil {
-			result[commonDirectory] = topLevel
-		}
+		return canonicalPath(topLevel)
 	}
-	return result
-}
-
-func primaryWorktreePath(commonDirectory string, items []worktree, primaryPaths map[string]string) (string, error) {
-	if items[0].Bare {
-		return canonicalPath(items[0].Path)
-	}
-	if primaryPath := primaryPaths[commonDirectory]; primaryPath != "" {
-		return primaryPath, nil
-	}
-	return canonicalPath(items[0].Path)
+	return "", fmt.Errorf("find primary worktree for %s", commonDirectory)
 }
 
 func mergedBranches(ctx context.Context, directory string) (map[string]bool, string) {
@@ -280,7 +254,7 @@ func containingWorktree(repositories []repository, path string) (int, int, bool)
 	return bestRepository, bestWorktree, bestLength >= 0
 }
 
-func overlayGitHubMerged(ctx context.Context, repositories []repository) bool {
+func githubMergedRows(ctx context.Context, repositories []repository) (bool, []row) {
 	type repositoryQuery struct {
 		rows map[string]row
 	}
@@ -311,22 +285,23 @@ func overlayGitHubMerged(ctx context.Context, repositories []repository) bool {
 	query.WriteString("}")
 	token, _ := auth.TokenForHost("github.com")
 	if token == "" {
-		return false
+		return false, nil
 	}
 	if len(queries) == 0 {
-		return true
+		return true, nil
 	}
 	client, err := api.NewGraphQLClient(api.ClientOptions{Host: "github.com", AuthToken: token})
 	if err != nil {
-		return true
+		return true, nil
 	}
 
 	apiContext, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	response := make(map[string]json.RawMessage)
 	if client.DoWithContext(apiContext, query.String(), nil, &response) != nil {
-		return true
+		return true, nil
 	}
+	var mergedRows []row
 	for repositoryAlias, repositoryQuery := range queries {
 		var commits map[string]struct {
 			AssociatedPullRequests struct {
@@ -342,19 +317,17 @@ func overlayGitHubMerged(ctx context.Context, repositories []repository) bool {
 			continue
 		}
 		for commitAlias, current := range repositoryQuery.rows {
-			item := &repositories[current.repository].Worktrees[current.worktree]
+			item := repositories[current.repository].Worktrees[current.worktree]
 			base := strings.TrimPrefix(repositories[current.repository].MergeTarget, "origin/")
 			for _, pullRequest := range commits[commitAlias].AssociatedPullRequests.Nodes {
 				if pullRequest.MergedAt != nil && pullRequest.BaseRefName == base && pullRequest.HeadRefName == item.Branch && pullRequest.HeadRefOID == item.Head {
-					item.Merged = true
-					item.MergeKnown = true
-					item.MergeSource = "GitHub"
+					mergedRows = append(mergedRows, current)
 					break
 				}
 			}
 		}
 	}
-	return true
+	return true, mergedRows
 }
 
 func githubRepository(ctx context.Context, directory string) (string, string, bool) {
