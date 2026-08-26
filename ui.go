@@ -35,6 +35,7 @@ type mergeMode int
 const (
 	allMergeStatuses mergeMode = iota
 	mergedOnly
+	closedOnly
 	notMergedOnly
 	unknownMergeStatus
 )
@@ -74,6 +75,7 @@ type githubMergeStatusMsg struct {
 	generation    int
 	authenticated bool
 	merged        []row
+	closed        []row
 }
 
 type gitRootsMsg struct {
@@ -298,6 +300,7 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		repo.MergeTarget = message.target
 		for worktreeIndex := range repo.Worktrees {
 			item := &repo.Worktrees[worktreeIndex]
+			item.Closed = false
 			if item.Branch != "" && message.target != "" {
 				item.Merged = message.merged[item.Branch]
 				item.MergeKnown = true
@@ -325,6 +328,16 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		for _, current := range message.merged {
 			item := &m.repositories[current.repository].Worktrees[current.worktree]
 			item.Merged = true
+			item.Closed = false
+			item.MergeKnown = true
+			item.MergeSource = "GitHub"
+		}
+		for _, current := range message.closed {
+			item := &m.repositories[current.repository].Worktrees[current.worktree]
+			if item.Merged {
+				continue
+			}
+			item.Closed = true
 			item.MergeKnown = true
 			item.MergeSource = "GitHub"
 		}
@@ -411,7 +424,7 @@ func (m model) updateKey(key string) (tea.Model, tea.Cmd) {
 		m.sessionMode = (m.sessionMode + 1) % 3
 		m.applyFilter()
 	case "m":
-		m.mergeMode = (m.mergeMode + 1) % 4
+		m.mergeMode = (m.mergeMode + 1) % 5
 		m.applyFilter()
 	case "r":
 		if len(m.visible) > 0 {
@@ -468,7 +481,8 @@ func (m *model) applyFilter() {
 			(m.sessionMode == withoutUnarchivedSessions && absenceKnown && !hasUnarchived)
 		mergeMatches := m.mergeMode == allMergeStatuses ||
 			(m.mergeMode == mergedOnly && item.MergeKnown && item.Merged) ||
-			(m.mergeMode == notMergedOnly && item.MergeKnown && !item.Merged) ||
+			(m.mergeMode == closedOnly && item.MergeKnown && item.Closed) ||
+			(m.mergeMode == notMergedOnly && item.MergeKnown && !item.Merged && !item.Closed) ||
 			(m.mergeMode == unknownMergeStatus && !item.MergeKnown)
 		if strings.Contains(haystack, query) && sessionMatches && mergeMatches {
 			m.visible = append(m.visible, current)
@@ -576,7 +590,7 @@ func (m model) compactRowHeight() int {
 		if branch == "" {
 			branch = "detached"
 		}
-		lineWidth := ansi.StringWidth("      Branch: " + branch + "  Merged: " + mergeLabel(item))
+		lineWidth := ansi.StringWidth("      Branch: " + branch + "  Status: " + mergeLabel(item))
 		wrapped := (lineWidth + m.width - 1) / m.width
 		if 1+wrapped > height {
 			height = 1 + wrapped
@@ -683,7 +697,7 @@ func (m model) View() tea.View {
 
 func (m model) browseView() string {
 	var output strings.Builder
-	fmt.Fprintf(&output, "\n\x1b[1mwt-man\x1b[0m  %d worktrees  %d selected  sessions: %s  merged: %s\n",
+	fmt.Fprintf(&output, "\n\x1b[1mwt-man\x1b[0m  %d worktrees  %d selected  sessions: %s  status: %s\n",
 		len(m.visible), len(m.selectedRows()), m.sessionMode.label(), m.mergeMode.label())
 	if progress := m.discoveryProgressView(); progress != "" {
 		output.WriteString(truncate(progress, m.width))
@@ -700,7 +714,7 @@ func (m model) browseView() string {
 	} else if m.query != "" {
 		fmt.Fprintf(&output, "Filter: %s  (/ to edit)\n\n", m.query)
 	} else {
-		output.WriteString("/ filter  u sessions  m merged  r refresh  R refresh all  space select  a all  enter review  q quit\n\n")
+		output.WriteString("/ filter  u sessions  m status  r refresh  R refresh all  space select  a all  enter review  q quit\n\n")
 	}
 
 	end := m.offset + m.pageSize()
@@ -712,13 +726,13 @@ func (m model) browseView() string {
 	var header string
 	if compact {
 		header = fmt.Sprintf("      %-*s %-10s %-10s %-8s %s",
-			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "MERGED")
+			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "STATUS")
 	} else if pathWidth > 0 {
 		header = fmt.Sprintf("      %-*s %-10s %-10s %-8s %-6s %-*s %s",
-			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "MERGED", m.branchWidth, "BRANCH", "PATH")
+			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "STATUS", m.branchWidth, "BRANCH", "PATH")
 	} else {
 		header = fmt.Sprintf("      %-*s %-10s %-10s %-8s %-6s %s",
-			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "MERGED", "BRANCH")
+			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "STATUS", "BRANCH")
 	}
 	output.WriteString(truncate(header, m.width))
 	output.WriteByte('\n')
@@ -763,7 +777,7 @@ func (m model) browseView() string {
 		if compact {
 			output.WriteString(truncate(line, m.width))
 			output.WriteByte('\n')
-			output.WriteString("      Branch: " + branch + "  Merged: " + merged)
+			output.WriteString("      Branch: " + branch + "  Status: " + merged)
 		} else {
 			line += fmt.Sprintf(" %-*s", m.branchWidth, branch)
 			if pathWidth > 0 {
@@ -807,7 +821,12 @@ func (m model) browseView() string {
 				branchDetails += " (" + item.LockReason + ")"
 			}
 		}
-		if item.MergeKnown {
+		if item.Closed {
+			branchDetails += "  PR to " + repo.MergeTarget + ": closed"
+			if item.MergeSource != "" {
+				branchDetails += " (" + item.MergeSource + ")"
+			}
+		} else if item.MergeKnown {
 			branchDetails += "  Merged into " + repo.MergeTarget + ": "
 			if item.Merged {
 				branchDetails += "yes"
@@ -841,6 +860,9 @@ func sessionLabel(sessions sessionCounts) string {
 }
 
 func mergeLabel(item worktree) string {
+	if item.Closed {
+		return "closed"
+	}
 	if item.MergeKnown {
 		if item.Merged {
 			return "yes"
@@ -932,8 +954,8 @@ func (m model) scanGitHubMergeStatus() tea.Cmd {
 	}
 	generation := m.generation
 	return func() tea.Msg {
-		authenticated, merged := githubMergedRows(context.Background(), repositories)
-		return githubMergeStatusMsg{generation: generation, authenticated: authenticated, merged: merged}
+		authenticated, merged, closed := githubPullRequestRows(context.Background(), repositories)
+		return githubMergeStatusMsg{generation: generation, authenticated: authenticated, merged: merged, closed: closed}
 	}
 }
 
@@ -989,6 +1011,8 @@ func (mode mergeMode) label() string {
 	switch mode {
 	case mergedOnly:
 		return "merged"
+	case closedOnly:
+		return "closed"
 	case notMergedOnly:
 		return "not merged"
 	case unknownMergeStatus:

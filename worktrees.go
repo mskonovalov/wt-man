@@ -46,6 +46,7 @@ type worktree struct {
 	Bare        bool
 	Missing     bool
 	Merged      bool
+	Closed      bool
 	MergeKnown  bool
 	MergeSource string
 	CreatedAt   time.Time
@@ -62,9 +63,20 @@ type repository struct {
 
 type associatedPullRequest struct {
 	MergedAt    *time.Time `json:"mergedAt"`
+	State       string     `json:"state"`
 	BaseRefName string     `json:"baseRefName"`
 	HeadRefName string     `json:"headRefName"`
+	HeadRefOID  string     `json:"headRefOid"`
 }
+
+type pullRequestStatus int
+
+const (
+	pullRequestUnmatched pullRequestStatus = iota
+	pullRequestClosed
+	pullRequestOpen
+	pullRequestMerged
+)
 
 var ignoredDirectories = map[string]bool{
 	".cache": true, ".yarn": true, "node_modules": true, "vendor": true,
@@ -267,9 +279,10 @@ func containingWorktree(repositories []repository, path string) (int, int, bool)
 	return bestRepository, bestWorktree, bestLength >= 0
 }
 
-func githubMergedRows(ctx context.Context, repositories []repository) (bool, []row) {
+func githubPullRequestRows(ctx context.Context, repositories []repository) (bool, []row, []row) {
 	type repositoryQuery struct {
-		rows map[string]row
+		commitRows map[string]row
+		closedRows map[string]row
 	}
 	queries := make(map[string]repositoryQuery)
 	var query strings.Builder
@@ -280,68 +293,121 @@ func githubMergedRows(ctx context.Context, repositories []repository) (bool, []r
 			continue
 		}
 		repositoryAlias := fmt.Sprintf("r%d", repositoryIndex)
-		current := repositoryQuery{rows: make(map[string]row)}
-		var commitsQuery strings.Builder
+		current := repositoryQuery{commitRows: make(map[string]row), closedRows: make(map[string]row)}
+		var repositoryFields strings.Builder
+		base := strings.TrimPrefix(repo.MergeTarget, "origin/")
 		for worktreeIndex, item := range repo.Worktrees {
 			if item.Branch == "" || item.Head == "" {
 				continue
 			}
 			commitAlias := fmt.Sprintf("c%d", worktreeIndex)
-			current.rows[commitAlias] = row{repository: repositoryIndex, worktree: worktreeIndex}
-			fmt.Fprintf(&commitsQuery, "%s: object(oid:%q) { ... on Commit { associatedPullRequests(first:10) { nodes { mergedAt baseRefName headRefName } } } }", commitAlias, item.Head)
+			current.commitRows[commitAlias] = row{repository: repositoryIndex, worktree: worktreeIndex}
+			fmt.Fprintf(&repositoryFields, "%s: object(oid:%q) { ... on Commit { associatedPullRequests(first:10) { nodes { mergedAt state baseRefName headRefName headRefOid } } } }", commitAlias, item.Head)
+			if base != "" {
+				closedAlias := fmt.Sprintf("p%d", worktreeIndex)
+				current.closedRows[closedAlias] = row{repository: repositoryIndex, worktree: worktreeIndex}
+				fmt.Fprintf(&repositoryFields, "%s: pullRequests(first:10, states:CLOSED, headRefName:%q, baseRefName:%q) { nodes { mergedAt state baseRefName headRefName headRefOid } }", closedAlias, item.Branch, base)
+			}
 		}
-		if len(current.rows) > 0 {
-			fmt.Fprintf(&query, "%s: repository(owner:%q,name:%q) {%s}", repositoryAlias, owner, name, commitsQuery.String())
+		if len(current.commitRows) > 0 {
+			fmt.Fprintf(&query, "%s: repository(owner:%q,name:%q) {%s}", repositoryAlias, owner, name, repositoryFields.String())
 			queries[repositoryAlias] = current
 		}
 	}
 	query.WriteString("}")
 	token, _ := auth.TokenForHost("github.com")
 	if token == "" {
-		return false, nil
+		return false, nil, nil
 	}
 	if len(queries) == 0 {
-		return true, nil
+		return true, nil, nil
 	}
 	client, err := api.NewGraphQLClient(api.ClientOptions{Host: "github.com", AuthToken: token})
 	if err != nil {
-		return true, nil
+		return true, nil, nil
 	}
 
 	apiContext, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	response := make(map[string]json.RawMessage)
 	if client.DoWithContext(apiContext, query.String(), nil, &response) != nil {
-		return true, nil
+		return true, nil, nil
 	}
-	var mergedRows []row
+	statuses := make(map[row]pullRequestStatus)
 	for repositoryAlias, repositoryQuery := range queries {
-		var commits map[string]struct {
-			AssociatedPullRequests struct {
-				Nodes []associatedPullRequest `json:"nodes"`
-			} `json:"associatedPullRequests"`
-		}
-		if json.Unmarshal(response[repositoryAlias], &commits) != nil {
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(response[repositoryAlias], &fields) != nil {
 			continue
 		}
-		for commitAlias, current := range repositoryQuery.rows {
+		for commitAlias, current := range repositoryQuery.commitRows {
+			var commit struct {
+				AssociatedPullRequests struct {
+					Nodes []associatedPullRequest `json:"nodes"`
+				} `json:"associatedPullRequests"`
+			}
+			if json.Unmarshal(fields[commitAlias], &commit) != nil {
+				continue
+			}
 			item := repositories[current.repository].Worktrees[current.worktree]
 			base := strings.TrimPrefix(repositories[current.repository].MergeTarget, "origin/")
-			for _, pullRequest := range commits[commitAlias].AssociatedPullRequests.Nodes {
-				if mergedPullRequestMatches(pullRequest, item, base) {
-					mergedRows = append(mergedRows, current)
-					break
+			for _, pullRequest := range commit.AssociatedPullRequests.Nodes {
+				if candidate := matchingPullRequestStatus(pullRequest, item, base); candidate > statuses[current] {
+					statuses[current] = candidate
+				}
+			}
+		}
+		for closedAlias, current := range repositoryQuery.closedRows {
+			var pullRequests struct {
+				Nodes []associatedPullRequest `json:"nodes"`
+			}
+			if json.Unmarshal(fields[closedAlias], &pullRequests) != nil {
+				continue
+			}
+			item := repositories[current.repository].Worktrees[current.worktree]
+			base := strings.TrimPrefix(repositories[current.repository].MergeTarget, "origin/")
+			for _, pullRequest := range pullRequests.Nodes {
+				if candidate := matchingClosedPullRequestStatus(pullRequest, item, base); candidate > statuses[current] {
+					statuses[current] = candidate
 				}
 			}
 		}
 	}
-	return true, mergedRows
+	var mergedRows []row
+	var closedRows []row
+	for current, status := range statuses {
+		switch status {
+		case pullRequestMerged:
+			mergedRows = append(mergedRows, current)
+		case pullRequestClosed:
+			closedRows = append(closedRows, current)
+		}
+	}
+	return true, mergedRows, closedRows
 }
 
-func mergedPullRequestMatches(pullRequest associatedPullRequest, item worktree, base string) bool {
+func matchingPullRequestStatus(pullRequest associatedPullRequest, item worktree, base string) pullRequestStatus {
 	// The pull requests were queried from item.Head, so the association itself is
 	// evidence that the commit belongs to the PR even when its final head differs.
-	return pullRequest.MergedAt != nil && pullRequest.BaseRefName == base && pullRequest.HeadRefName == item.Branch
+	if pullRequest.BaseRefName != base || pullRequest.HeadRefName != item.Branch {
+		return pullRequestUnmatched
+	}
+	if pullRequest.MergedAt != nil {
+		return pullRequestMerged
+	}
+	if pullRequest.State == "OPEN" {
+		return pullRequestOpen
+	}
+	if pullRequest.State == "CLOSED" {
+		return pullRequestClosed
+	}
+	return pullRequestUnmatched
+}
+
+func matchingClosedPullRequestStatus(pullRequest associatedPullRequest, item worktree, base string) pullRequestStatus {
+	if pullRequest.HeadRefOID != item.Head {
+		return pullRequestUnmatched
+	}
+	return matchingPullRequestStatus(pullRequest, item, base)
 }
 
 func githubRepository(ctx context.Context, directory string) (string, string, bool) {

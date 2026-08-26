@@ -66,10 +66,11 @@ func TestGitHubRepositoryFromOrigin(t *testing.T) {
 	}
 }
 
-func TestMergedPullRequestMatchesEarlierBranchCommit(t *testing.T) {
+func TestMatchingPullRequestStatus(t *testing.T) {
 	mergedAt := time.Now()
 	pullRequest := associatedPullRequest{
 		MergedAt:    &mergedAt,
+		State:       "CLOSED",
 		BaseRefName: "main",
 		HeadRefName: "misha/dp-5500-event-lib-5-3-0",
 	}
@@ -77,20 +78,61 @@ func TestMergedPullRequestMatchesEarlierBranchCommit(t *testing.T) {
 		Branch: "misha/dp-5500-event-lib-5-3-0",
 		Head:   "earlier-commit-in-associated-pr",
 	}
-	if !mergedPullRequestMatches(pullRequest, item, "main") {
-		t.Fatal("earlier commit associated with the merged PR was not matched")
+	if status := matchingPullRequestStatus(pullRequest, item, "main"); status != pullRequestMerged {
+		t.Fatalf("got status %v for merged PR", status)
 	}
-	if mergedPullRequestMatches(pullRequest, item, "release") {
+	if status := matchingPullRequestStatus(pullRequest, item, "release"); status != pullRequestUnmatched {
 		t.Fatal("pull request with a different base was matched")
 	}
 	item.Branch = "different-branch"
-	if mergedPullRequestMatches(pullRequest, item, "main") {
+	if status := matchingPullRequestStatus(pullRequest, item, "main"); status != pullRequestUnmatched {
 		t.Fatal("pull request with a different head branch was matched")
 	}
 	pullRequest.MergedAt = nil
 	item.Branch = "misha/dp-5500-event-lib-5-3-0"
-	if mergedPullRequestMatches(pullRequest, item, "main") {
-		t.Fatal("unmerged pull request was matched")
+	if status := matchingPullRequestStatus(pullRequest, item, "main"); status != pullRequestClosed {
+		t.Fatalf("got status %v for closed PR", status)
+	}
+	pullRequest.State = "OPEN"
+	if status := matchingPullRequestStatus(pullRequest, item, "main"); status != pullRequestOpen {
+		t.Fatalf("got status %v for open PR", status)
+	}
+	pullRequest.State = ""
+	if status := matchingPullRequestStatus(pullRequest, item, "main"); status != pullRequestUnmatched {
+		t.Fatalf("got status %v for unknown PR state", status)
+	}
+}
+
+func TestOpenPullRequestTakesPrecedenceOverClosed(t *testing.T) {
+	item := worktree{Branch: "feature/reused"}
+	status := pullRequestUnmatched
+	for _, pullRequest := range []associatedPullRequest{
+		{State: "CLOSED", BaseRefName: "main", HeadRefName: item.Branch},
+		{State: "OPEN", BaseRefName: "main", HeadRefName: item.Branch},
+	} {
+		if candidate := matchingPullRequestStatus(pullRequest, item, "main"); candidate > status {
+			status = candidate
+		}
+	}
+	if status != pullRequestOpen {
+		t.Fatalf("got status %v, want open", status)
+	}
+}
+
+func TestClosedPullRequestRequiresExactHead(t *testing.T) {
+	item := worktree{Branch: "feature/closed", Head: "local-head"}
+	pullRequest := associatedPullRequest{
+		State:       "CLOSED",
+		BaseRefName: "main",
+		HeadRefName: item.Branch,
+		HeadRefOID:  "different-head",
+	}
+	if status := matchingClosedPullRequestStatus(pullRequest, item, "main"); status != pullRequestUnmatched {
+		t.Fatalf("got status %v for a different closed PR head", status)
+	}
+	pullRequest.HeadRefOID = item.Head
+	if status := matchingClosedPullRequestStatus(pullRequest, item, "main"); status != pullRequestClosed {
+		t.Fatalf("got status %v for an exact closed PR head", status)
 	}
 }
 
@@ -225,7 +267,7 @@ func TestDiscoverUsesWorktreePathWithSeparateGitDirectory(t *testing.T) {
 	}
 }
 
-func TestRemoveWorktreeKeepsUnmergedBranch(t *testing.T) {
+func TestRemoveWorktreeKeepsClosedUnmergedBranch(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repoPath := filepath.Join(root, "repo")
@@ -246,7 +288,7 @@ func TestRemoveWorktreeKeepsUnmergedBranch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result := removeWorktree(ctx, repository{MainPath: repoPath}, worktree{Path: linkedPath, Branch: "unmerged"}, true)
+	result := removeWorktree(ctx, repository{MainPath: repoPath}, worktree{Path: linkedPath, Branch: "unmerged", Closed: true}, true)
 	if result.Err == nil || !result.Removed || result.BranchDeleted {
 		t.Fatalf("unexpected safe branch deletion result: %#v", result)
 	}
@@ -398,11 +440,12 @@ func TestModelFiltersByMergeStatus(t *testing.T) {
 		Name: "example",
 		Worktrees: []worktree{
 			{Path: "/tmp/merged", MergeKnown: true, Merged: true},
+			{Path: "/tmp/closed", MergeKnown: true, Closed: true},
 			{Path: "/tmp/not-merged", MergeKnown: true},
 			{Path: "/tmp/unknown"},
 		},
 	}})
-	want := []string{"/tmp/merged", "/tmp/not-merged", "/tmp/unknown"}
+	want := []string{"/tmp/merged", "/tmp/closed", "/tmp/not-merged", "/tmp/unknown"}
 	for index, path := range want {
 		updated, _ := m.updateKey("m")
 		m = updated.(model)
@@ -412,8 +455,8 @@ func TestModelFiltersByMergeStatus(t *testing.T) {
 	}
 	updated, _ := m.updateKey("m")
 	m = updated.(model)
-	if len(m.visible) != 3 {
-		t.Fatalf("all merge statuses returned %d rows, want 3", len(m.visible))
+	if len(m.visible) != 4 {
+		t.Fatalf("all merge statuses returned %d rows, want 4", len(m.visible))
 	}
 }
 
@@ -474,18 +517,19 @@ func TestModelShowsMergeTargetAndStatus(t *testing.T) {
 	}})
 
 	view := m.browseView()
-	if !strings.Contains(view, "MERGED") || !strings.Contains(view, "Merged into origin/main: yes") {
+	if !strings.Contains(view, "STATUS") || !strings.Contains(view, "Merged into origin/main: yes") {
 		t.Fatalf("merge status was not rendered: %q", view)
 	}
 }
 
 func TestGitHubMergeStatusUpdatesRows(t *testing.T) {
 	m := newModel([]repository{{
-		Name: "example",
-		Worktrees: []worktree{{
-			Path:   "/tmp/merged",
-			Branch: "feature/merged",
-		}},
+		Name:        "example",
+		MergeTarget: "origin/main",
+		Worktrees: []worktree{
+			{Path: "/tmp/merged", Branch: "feature/merged"},
+			{Path: "/tmp/closed", Branch: "feature/closed"},
+		},
 	}})
 	m.githubMergePending = true
 
@@ -493,11 +537,21 @@ func TestGitHubMergeStatusUpdatesRows(t *testing.T) {
 		generation:    m.generation,
 		authenticated: true,
 		merged:        []row{{repository: 0, worktree: 0}},
+		closed:        []row{{repository: 0, worktree: 1}},
 	})
 	m = updated.(model)
-	item := m.item(m.rows[0])
-	if m.githubMergePending || !m.githubAuthChecked || !m.githubAuthAvailable || !item.Merged || item.MergeSource != "GitHub" {
-		t.Fatalf("GitHub merge status was not applied: %#v, model=%#v", item, m)
+	merged := m.item(m.rows[0])
+	closed := m.item(m.rows[1])
+	if m.githubMergePending || !m.githubAuthChecked || !m.githubAuthAvailable || !merged.Merged || merged.Closed || merged.MergeSource != "GitHub" {
+		t.Fatalf("GitHub merged status was not applied: %#v, model=%#v", merged, m)
+	}
+	if closed.Merged || !closed.Closed || !closed.MergeKnown || closed.MergeSource != "GitHub" {
+		t.Fatalf("GitHub closed status was not applied: %#v, model=%#v", closed, m)
+	}
+	m.cursor = 1
+	view := m.browseView()
+	if !strings.Contains(view, "closed") || !strings.Contains(view, "PR to origin/main: closed (GitHub)") {
+		t.Fatalf("closed status was not rendered: %q", view)
 	}
 }
 
