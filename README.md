@@ -2,7 +2,7 @@
 
 wt-man is an interactive manager for Git worktrees spread across many repositories.
 
-It scans ~/work by default and groups linked worktrees by repository. The terminal UI opens immediately and adds repositories as they are discovered. On macOS, each group is ordered by filesystem creation time; on other platforms, it retains Git's worktree-list order because a reliable creation time may be unavailable. The terminal UI supports filtering, multi-selection, unarchived Claude/Codex session warnings, bulk removal, and optional local branch deletion.
+By default, wt-man recursively searches the current directory for Git repositories and groups their linked worktrees by repository. The terminal UI opens immediately and adds repositories as they are discovered. On macOS, each group is ordered by filesystem creation time; on other platforms, it retains Git's worktree-list order because a reliable creation time may be unavailable. The terminal UI supports filtering, multi-selection, unarchived Claude/Codex session warnings, bulk removal, and optional local branch deletion.
 
 ![wt-man interactive interface with fictional repositories](docs/wt-man-demo.gif)
 
@@ -35,6 +35,7 @@ go build .
 ## Usage
 
 ~~~sh
+cd /path/containing/repositories
 wt-man
 wt-man --root /path/to/workspace
 ~~~
