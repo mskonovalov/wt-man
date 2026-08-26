@@ -8,6 +8,20 @@ It scans ~/work by default and groups linked worktrees by repository. The termin
 
 ## Install
 
+Install the latest release binary into `~/.local/bin`:
+
+~~~sh
+curl -fsSL https://raw.githubusercontent.com/mskonovalov/wt-man/main/install.sh | sh
+~~~
+
+The installer detects macOS or Linux and amd64 or arm64, then verifies the downloaded archive against the published SHA-256 checksums. To choose another directory:
+
+~~~sh
+curl -fsSL https://raw.githubusercontent.com/mskonovalov/wt-man/main/install.sh | WT_MAN_INSTALL_DIR=/usr/local/bin sh
+~~~
+
+If Go is installed, you can instead build and install the latest tagged version:
+
 ~~~sh
 go install github.com/mskonovalov/wt-man@latest
 ~~~
