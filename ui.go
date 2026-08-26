@@ -419,7 +419,10 @@ func (m model) pageSize() int {
 	if m.height < 13 {
 		return 1
 	}
-	size := m.height - 13
+	size := m.height - 12
+	if len(m.modificationQueue) > 0 {
+		size--
+	}
 	if m.compactRows() {
 		size /= m.compactRowHeight()
 	}
@@ -549,8 +552,10 @@ func (m model) browseView() string {
 	var output strings.Builder
 	fmt.Fprintf(&output, "\n\x1b[1mwt-man\x1b[0m  %d worktrees  %d selected  sessions: %s  merged: %s\n",
 		len(m.visible), len(m.selectedRows()), m.sessionMode.label(), m.mergeMode.label())
-	output.WriteString(truncate(m.modificationProgressView(), m.width))
-	output.WriteByte('\n')
+	if progress := m.modificationProgressView(); progress != "" {
+		output.WriteString(truncate(progress, m.width))
+		output.WriteByte('\n')
+	}
 	output.WriteString(truncate(m.mergeProgressView(), m.width))
 	output.WriteByte('\n')
 	if m.filtering {
@@ -748,11 +753,7 @@ func (m model) scanGitHubMergeStatus() tea.Cmd {
 
 func (m model) modificationProgressView() string {
 	if len(m.modificationQueue) == 0 {
-		if m.modificationTotal == 0 {
-			return "Date scan: cache current"
-		}
-		return fmt.Sprintf("Date scan %s %d/%d complete",
-			progressBar(m.modificationDone, m.modificationTotal, 20), m.modificationDone, m.modificationTotal)
+		return ""
 	}
 	item := m.item(m.modificationQueue[0])
 	return fmt.Sprintf("Date scan %s %d/%d  %s",
