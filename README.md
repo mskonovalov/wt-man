@@ -1,5 +1,8 @@
 # wt-man
 
+[![Latest release](https://img.shields.io/github/v/release/mskonovalov/wt-man)](https://github.com/mskonovalov/wt-man/releases/latest)
+[![CI](https://github.com/mskonovalov/wt-man/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mskonovalov/wt-man/actions/workflows/ci.yml)
+
 wt-man is an interactive manager for Git worktrees spread across many repositories.
 
 It scans ~/work by default and groups linked worktrees by repository. The terminal UI opens immediately and adds repositories as they are discovered. On macOS, each group is ordered by filesystem creation time; on other platforms, it retains Git's worktree-list order because a reliable creation time may be unavailable. The terminal UI supports filtering, multi-selection, unarchived Claude/Codex session warnings, bulk removal, and optional local branch deletion.
