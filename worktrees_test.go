@@ -257,6 +257,32 @@ func TestGitDirectoryHeuristicDoesNotPruneOrdinarySubtree(t *testing.T) {
 	}
 }
 
+func TestBrokenDotGitDoesNotPruneNestedRepository(t *testing.T) {
+	root := t.TempDir()
+	container := filepath.Join(root, "ordinary")
+	nested := filepath.Join(container, "nested")
+	if err := os.MkdirAll(container, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(container, ".git"), []byte("gitdir: /does/not/exist\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(context.Background(), container, "init", "-b", "main", nested); err != nil {
+		t.Fatal(err)
+	}
+	roots, err := findGitRoots(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nested, _ = canonicalPath(nested)
+	if len(roots) == 1 {
+		roots[0], _ = canonicalPath(roots[0])
+	}
+	if len(roots) != 1 || roots[0] != nested {
+		t.Fatalf("broken .git entry pruned nested repository: %#v", roots)
+	}
+}
+
 func TestModificationTimeFindsNewestFilesystemEntry(t *testing.T) {
 	root := t.TempDir()
 	olderPath := filepath.Join(root, "older")

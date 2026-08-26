@@ -172,7 +172,7 @@ func findPrimaryWorktreePaths(ctx context.Context, gitRoots []string) map[string
 		if err != nil {
 			continue
 		}
-		gitDirectory, err := git(ctx, root, "rev-parse", "--path-format=absolute", "--absolute-git-dir")
+		gitDirectory, err := git(ctx, root, "rev-parse", "--absolute-git-dir")
 		if err != nil {
 			continue
 		}
@@ -279,8 +279,10 @@ func findGitRoots(root string) ([]string, error) {
 	var visit func(string) error
 	visit = func(directory string) error {
 		if _, err := os.Lstat(filepath.Join(directory, ".git")); err == nil {
-			roots = append(roots, directory)
-			return nil
+			if isWorktreeGitRoot(directory) {
+				roots = append(roots, directory)
+				return nil
+			}
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
@@ -305,13 +307,26 @@ func findGitRoots(root string) ([]string, error) {
 	return roots, visit(root)
 }
 
+func isWorktreeGitRoot(directory string) bool {
+	topLevel, err := git(context.Background(), directory, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return false
+	}
+	topLevel, err = canonicalPath(topLevel)
+	if err != nil {
+		return false
+	}
+	directory, err = canonicalPath(directory)
+	return err == nil && topLevel == directory
+}
+
 func isStandaloneGitDirectory(directory string) bool {
 	head, headErr := os.Stat(filepath.Join(directory, "HEAD"))
 	objects, objectsErr := os.Stat(filepath.Join(directory, "objects"))
 	if headErr != nil || !head.Mode().IsRegular() || objectsErr != nil || !objects.IsDir() {
 		return false
 	}
-	gitDirectory, err := git(context.Background(), directory, "rev-parse", "--path-format=absolute", "--absolute-git-dir")
+	gitDirectory, err := git(context.Background(), directory, "rev-parse", "--absolute-git-dir")
 	if err != nil {
 		return false
 	}
