@@ -43,22 +43,23 @@ type modificationCacheEntry struct {
 const modificationCacheTTL = 24 * time.Hour
 
 type worktree struct {
-	Path        string
-	Branch      string
-	Head        string
-	Detached    bool
-	Locked      bool
-	LockReason  string
-	Prunable    bool
-	Bare        bool
-	Missing     bool
-	Merged      bool
-	Closed      bool
-	MergeKnown  bool
-	MergeSource string
-	CreatedAt   time.Time
-	ModifiedAt  time.Time
-	Sessions    sessionCounts
+	Path              string
+	Branch            string
+	Head              string
+	Detached          bool
+	Locked            bool
+	LockReason        string
+	Prunable          bool
+	Bare              bool
+	Missing           bool
+	Merged            bool
+	MergeKnown        bool
+	MergeSource       string
+	PullRequestStatus pullRequestStatus
+	PullRequestKnown  bool
+	CreatedAt         time.Time
+	ModifiedAt        time.Time
+	Sessions          sessionCounts
 }
 
 type repository struct {
@@ -292,7 +293,7 @@ func containingWorktree(repositories []repository, path string) (int, int, bool)
 	return bestRepository, bestWorktree, bestLength >= 0
 }
 
-func githubPullRequestRows(ctx context.Context, repositories []repository) (bool, []row, []row) {
+func githubPullRequestRows(ctx context.Context, repositories []repository) (bool, map[row]pullRequestStatus) {
 	type repositoryQuery struct {
 		commitRows map[string]row
 		closedRows map[string]row
@@ -330,21 +331,21 @@ func githubPullRequestRows(ctx context.Context, repositories []repository) (bool
 	query.WriteString("}")
 	token, _ := auth.TokenForHost("github.com")
 	if token == "" {
-		return false, nil, nil
+		return false, nil
 	}
 	if len(queries) == 0 {
-		return true, nil, nil
+		return true, nil
 	}
 	client, err := api.NewGraphQLClient(api.ClientOptions{Host: "github.com", AuthToken: token})
 	if err != nil {
-		return true, nil, nil
+		return true, nil
 	}
 
 	apiContext, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	response := make(map[string]json.RawMessage)
 	if client.DoWithContext(apiContext, query.String(), nil, &response) != nil {
-		return true, nil, nil
+		return true, nil
 	}
 	statuses := make(map[row]pullRequestStatus)
 	for repositoryAlias, repositoryQuery := range queries {
@@ -385,17 +386,7 @@ func githubPullRequestRows(ctx context.Context, repositories []repository) (bool
 			}
 		}
 	}
-	var mergedRows []row
-	var closedRows []row
-	for current, status := range statuses {
-		switch status {
-		case pullRequestMerged:
-			mergedRows = append(mergedRows, current)
-		case pullRequestClosed:
-			closedRows = append(closedRows, current)
-		}
-	}
-	return true, mergedRows, closedRows
+	return true, statuses
 }
 
 func matchingPullRequestStatus(pullRequest associatedPullRequest, item worktree, base string) pullRequestStatus {

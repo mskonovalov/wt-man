@@ -289,7 +289,7 @@ func TestRemoveWorktreeKeepsClosedUnmergedBranch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result := removeWorktree(ctx, repository{MainPath: repoPath}, worktree{Path: linkedPath, Branch: "unmerged", Closed: true}, true)
+	result := removeWorktree(ctx, repository{MainPath: repoPath}, worktree{Path: linkedPath, Branch: "unmerged", PullRequestKnown: true, PullRequestStatus: pullRequestClosed}, true)
 	if result.Err == nil || !result.Removed || result.BranchDeleted {
 		t.Fatalf("unexpected safe branch deletion result: %#v", result)
 	}
@@ -436,28 +436,28 @@ func TestModelFiltersAndSelectsVisibleRows(t *testing.T) {
 	}
 }
 
-func TestModelFiltersByMergeStatus(t *testing.T) {
+func TestModelFiltersByPullRequestStatus(t *testing.T) {
 	m := newModel([]repository{{
 		Name: "example",
 		Worktrees: []worktree{
-			{Path: "/tmp/merged", MergeKnown: true, Merged: true},
-			{Path: "/tmp/closed", MergeKnown: true, Closed: true},
-			{Path: "/tmp/not-merged", MergeKnown: true},
-			{Path: "/tmp/unknown"},
+			{Path: "/tmp/closed", PullRequestKnown: true, PullRequestStatus: pullRequestClosed},
+			{Path: "/tmp/merged", PullRequestKnown: true, PullRequestStatus: pullRequestMerged},
+			{Path: "/tmp/open", PullRequestKnown: true, PullRequestStatus: pullRequestOpen},
+			{Path: "/tmp/not-applicable", PullRequestKnown: true},
 		},
 	}})
-	want := []string{"/tmp/merged", "/tmp/closed", "/tmp/not-merged", "/tmp/unknown"}
+	want := []string{"/tmp/closed", "/tmp/merged", "/tmp/open", "/tmp/not-applicable"}
 	for index, path := range want {
-		updated, _ := m.updateKey("m")
+		updated, _ := m.updateKey("p")
 		m = updated.(model)
 		if len(m.visible) != 1 || m.item(m.visible[0]).Path != path {
 			t.Fatalf("cycle %d returned %#v, want %s", index+1, m.visible, path)
 		}
 	}
-	updated, _ := m.updateKey("m")
+	updated, _ := m.updateKey("p")
 	m = updated.(model)
 	if len(m.visible) != 4 {
-		t.Fatalf("all merge statuses returned %d rows, want 4", len(m.visible))
+		t.Fatalf("all PR statuses returned %d rows, want 4", len(m.visible))
 	}
 }
 
@@ -510,16 +510,18 @@ func TestModelShowsMergeTargetAndStatus(t *testing.T) {
 		Name:        "example",
 		MergeTarget: "origin/main",
 		Worktrees: []worktree{{
-			Path:       "/tmp/merged",
-			Branch:     "feature/merged",
-			MergeKnown: true,
-			Merged:     true,
+			Path:              "/tmp/merged",
+			Branch:            "feature/merged",
+			MergeKnown:        true,
+			Merged:            true,
+			PullRequestKnown:  true,
+			PullRequestStatus: pullRequestMerged,
 		}},
 	}})
 
 	view := m.browseView()
-	if !strings.Contains(view, "STATUS") || !strings.Contains(view, "Merged into origin/main: yes") {
-		t.Fatalf("merge status was not rendered: %q", view)
+	if !strings.Contains(view, "PR") || !strings.Contains(view, "merged") || !strings.Contains(view, "Merged into origin/main: yes") {
+		t.Fatalf("PR and local merge statuses were not rendered: %q", view)
 	}
 }
 
@@ -530,28 +532,38 @@ func TestGitHubMergeStatusUpdatesRows(t *testing.T) {
 		Worktrees: []worktree{
 			{Path: "/tmp/merged", Branch: "feature/merged"},
 			{Path: "/tmp/closed", Branch: "feature/closed"},
+			{Path: "/tmp/open", Branch: "feature/open"},
+			{Path: "/tmp/not-applicable", Branch: "feature/no-pr"},
 		},
 	}})
 	m.githubMergePending = true
 
-	updated, _ := m.Update(githubMergeStatusMsg{
+	updated, _ := m.Update(githubPullRequestStatusMsg{
 		generation:    m.generation,
 		authenticated: true,
-		merged:        []row{{repository: 0, worktree: 0}},
-		closed:        []row{{repository: 0, worktree: 1}},
+		statuses: map[row]pullRequestStatus{
+			{repository: 0, worktree: 0}: pullRequestMerged,
+			{repository: 0, worktree: 1}: pullRequestClosed,
+			{repository: 0, worktree: 2}: pullRequestOpen,
+		},
 	})
 	m = updated.(model)
 	merged := m.item(m.rows[0])
 	closed := m.item(m.rows[1])
-	if m.githubMergePending || !m.githubAuthChecked || !m.githubAuthAvailable || !merged.Merged || merged.Closed || merged.MergeSource != "GitHub" {
-		t.Fatalf("GitHub merged status was not applied: %#v, model=%#v", merged, m)
+	open := m.item(m.rows[2])
+	notApplicable := m.item(m.rows[3])
+	if m.githubMergePending || !m.githubAuthChecked || !m.githubAuthAvailable {
+		t.Fatalf("GitHub check did not finish: %#v", m)
 	}
-	if closed.Merged || !closed.Closed || !closed.MergeKnown || closed.MergeSource != "GitHub" {
-		t.Fatalf("GitHub closed status was not applied: %#v, model=%#v", closed, m)
+	if !merged.PullRequestKnown || merged.PullRequestStatus != pullRequestMerged || merged.Merged {
+		t.Fatalf("GitHub merged PR status was not kept separate from local merge status: %#v", merged)
+	}
+	if closed.PullRequestStatus != pullRequestClosed || open.PullRequestStatus != pullRequestOpen || !notApplicable.PullRequestKnown || notApplicable.PullRequestStatus != pullRequestUnmatched {
+		t.Fatalf("GitHub PR statuses were not applied: merged=%#v closed=%#v open=%#v n/a=%#v", merged, closed, open, notApplicable)
 	}
 	m.cursor = 1
 	view := m.browseView()
-	if !strings.Contains(view, "closed") || !strings.Contains(view, "PR to origin/main: closed (GitHub)") {
+	if !strings.Contains(view, "closed") || !strings.Contains(view, "PR: closed") {
 		t.Fatalf("closed status was not rendered: %q", view)
 	}
 }
