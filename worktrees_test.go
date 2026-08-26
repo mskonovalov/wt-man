@@ -438,8 +438,12 @@ func TestModelShowsModificationScanProgressAndResult(t *testing.T) {
 	modified := time.Date(2026, 8, 24, 12, 0, 0, 0, time.Local)
 	updated, _ := m.Update(modificationTimeMsg{row: m.rows[0], modifiedAt: modified})
 	m = updated.(model)
-	if !strings.Contains(m.browseView(), "2026-08-24") {
+	view := m.browseView()
+	if !strings.Contains(view, "2026-08-24") {
 		t.Fatal("modification date was not rendered")
+	}
+	if strings.Contains(view, "Date scan") {
+		t.Fatalf("completed date scan remained visible: %q", view)
 	}
 }
 

@@ -456,8 +456,10 @@ func (m model) browseView() string {
 	var output strings.Builder
 	fmt.Fprintf(&output, "\n\x1b[1mwt-man\x1b[0m  %d worktrees  %d selected  sessions: %s\n",
 		len(m.visible), len(m.selectedRows()), m.sessionMode.label())
-	output.WriteString(truncate(m.modificationProgressView(), m.width))
-	output.WriteByte('\n')
+	if progress := m.modificationProgressView(); progress != "" {
+		output.WriteString(truncate(progress, m.width))
+		output.WriteByte('\n')
+	}
 	if m.filtering {
 		fmt.Fprintf(&output, "Filter: %s█\n\n", m.query)
 	} else if m.query != "" {
@@ -630,11 +632,7 @@ func scanModificationTime(generation int, current row, path string) tea.Cmd {
 
 func (m model) modificationProgressView() string {
 	if len(m.modificationQueue) == 0 {
-		if m.modificationTotal == 0 {
-			return "Date scan: cache current"
-		}
-		return fmt.Sprintf("Date scan %s %d/%d complete",
-			progressBar(m.modificationDone, m.modificationTotal, 20), m.modificationDone, m.modificationTotal)
+		return ""
 	}
 	item := m.item(m.modificationQueue[0])
 	return fmt.Sprintf("Date scan %s %d/%d  %s",
