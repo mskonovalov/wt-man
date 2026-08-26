@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type screen int
@@ -158,6 +159,9 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, scanModificationTime(m.generation, current, m.item(current).Path)
 	case tea.KeyPressMsg:
 		if message.String() == "ctrl+c" {
+			if m.screen == deletingScreen {
+				return m, nil
+			}
 			return m, tea.Quit
 		}
 		return m.updateKey(message.String())
@@ -280,9 +284,10 @@ func (m *model) applyFilter() {
 		item := repo.Worktrees[current.worktree]
 		haystack := strings.ToLower(repo.Name + " " + item.Branch + " " + item.Path)
 		hasUnarchived := item.Sessions.Claude+item.Sessions.Codex > 0
+		absenceKnown := item.Sessions.ClaudeKnown && item.Sessions.CodexKnown
 		sessionMatches := m.sessionMode == allSessions ||
 			(m.sessionMode == withUnarchivedSessions && hasUnarchived) ||
-			(m.sessionMode == withoutUnarchivedSessions && !hasUnarchived)
+			(m.sessionMode == withoutUnarchivedSessions && absenceKnown && !hasUnarchived)
 		if strings.Contains(haystack, query) && sessionMatches {
 			m.visible = append(m.visible, current)
 		}
@@ -324,12 +329,32 @@ func (m model) pageSize() int {
 	}
 	size := m.height - 12
 	if m.compactRows() {
-		size /= 2
+		size /= m.compactRowHeight()
 	}
 	if size < 1 {
 		return 1
 	}
 	return size
+}
+
+func (m model) compactRowHeight() int {
+	height := 2
+	if m.width <= 0 {
+		return height
+	}
+	for _, current := range m.visible {
+		item := m.item(current)
+		branch := item.Branch
+		if branch == "" {
+			branch = "detached"
+		}
+		lineWidth := ansi.StringWidth("      Branch: " + branch + "  Merged: " + mergeLabel(item))
+		wrapped := (lineWidth + m.width - 1) / m.width
+		if 1+wrapped > height {
+			height = 1 + wrapped
+		}
+	}
+	return height
 }
 
 func (m *model) ensureCursorVisible() {
@@ -491,20 +516,8 @@ func (m model) browseView() string {
 		if branch == "" {
 			branch = "detached"
 		}
-		warning := ""
-		if item.Sessions.Claude+item.Sessions.Codex > 0 {
-			warning = " !"
-		}
-		sessions := fmt.Sprintf("C%d X%d%s", item.Sessions.Claude, item.Sessions.Codex, warning)
-		merged := "n/a"
-		if item.MergeKnown {
-			merged = "no"
-			if item.Merged {
-				merged = "yes"
-			}
-		} else if item.Branch != "" {
-			merged = "?"
-		}
+		sessions := sessionLabel(item.Sessions)
+		merged := mergeLabel(item)
 		line := fmt.Sprintf("%s [%s] %-*s %-10s %-10s %-8s %-6s",
 			pointer, checked, m.repositoryWidth, repoName, created, modified, sessions, merged)
 		if compact {
@@ -529,9 +542,22 @@ func (m model) browseView() string {
 		output.WriteByte('\n')
 		output.WriteString(truncate("Path: "+item.Path, m.width))
 		output.WriteByte('\n')
-		branchDetails := "Branch: " + item.Branch
+		branch := item.Branch
+		if branch == "" {
+			branch = "detached"
+		}
+		branchDetails := "Branch: " + branch
 		if item.Missing {
-			branchDetails += "  State: missing (prunable; Git record only)"
+			branchDetails += "  State: missing (Git record only)"
+			if item.Prunable {
+				branchDetails += "; prunable"
+			}
+		}
+		if item.Locked {
+			branchDetails += "  State: locked"
+			if item.LockReason != "" {
+				branchDetails += " (" + item.LockReason + ")"
+			}
 		}
 		if item.MergeKnown {
 			branchDetails += "  Merged into " + repo.MergeTarget + ": "
@@ -545,6 +571,35 @@ func (m model) browseView() string {
 		output.WriteByte('\n')
 	}
 	return output.String()
+}
+
+func sessionLabel(sessions sessionCounts) string {
+	claude := "?"
+	if sessions.ClaudeKnown {
+		claude = fmt.Sprint(sessions.Claude)
+	}
+	codex := "?"
+	if sessions.CodexKnown {
+		codex = fmt.Sprint(sessions.Codex)
+	}
+	warning := ""
+	if sessions.Claude+sessions.Codex > 0 || !sessions.ClaudeKnown || !sessions.CodexKnown {
+		warning = " !"
+	}
+	return fmt.Sprintf("C%s X%s%s", claude, codex, warning)
+}
+
+func mergeLabel(item worktree) string {
+	if item.MergeKnown {
+		if item.Merged {
+			return "yes"
+		}
+		return "no"
+	}
+	if item.Branch != "" {
+		return "?"
+	}
+	return "n/a"
 }
 
 func (m model) pathColumnWidth() int {
@@ -610,6 +665,13 @@ func (m model) reviewView() string {
 		repo := m.repositories[current.repository]
 		item := repo.Worktrees[current.worktree]
 		fmt.Fprintf(&output, "  [%s] %s", repo.Name, item.Path)
+		if item.Locked {
+			output.WriteString("  \x1b[31mLOCKED: will not delete")
+			if item.LockReason != "" {
+				output.WriteString(" (" + item.LockReason + ")")
+			}
+			output.WriteString("\x1b[0m")
+		}
 		if item.Missing {
 			output.WriteString("  \x1b[33mmissing: delete Git record only\x1b[0m")
 		} else {
@@ -618,11 +680,21 @@ func (m model) reviewView() string {
 		if item.Sessions.Claude+item.Sessions.Codex > 0 {
 			fmt.Fprintf(&output, "  \x1b[33mClaude %d, Codex %d unarchived\x1b[0m", item.Sessions.Claude, item.Sessions.Codex)
 		}
+		if !item.Sessions.ClaudeKnown || !item.Sessions.CodexKnown {
+			var unknown []string
+			if !item.Sessions.ClaudeKnown {
+				unknown = append(unknown, "Claude")
+			}
+			if !item.Sessions.CodexKnown {
+				unknown = append(unknown, "Codex")
+			}
+			fmt.Fprintf(&output, "  \x1b[33m%s session status unknown\x1b[0m", strings.Join(unknown, "/"))
+		}
 		output.WriteByte('\n')
 	}
 	branches := "keep local branches"
 	if m.deleteBranches {
-		branches = "DELETE local branches"
+		branches = "delete merged local branches (Git safe check)"
 	}
 	fmt.Fprintf(&output, "\n[x] %s\n[b] back  [D] delete permanently  [q] quit\n", branches)
 	return output.String()

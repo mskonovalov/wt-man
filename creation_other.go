@@ -2,15 +2,8 @@
 
 package main
 
-import (
-	"os"
-	"time"
-)
+import "time"
 
-func creationTime(path string) time.Time {
-	info, err := os.Stat(path)
-	if err != nil {
-		return time.Time{}
-	}
-	return info.ModTime()
+func creationTime(string) time.Time {
+	return time.Time{}
 }
