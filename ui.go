@@ -44,6 +44,11 @@ type row struct {
 	worktree   int
 }
 
+type displayedSession struct {
+	provider string
+	detail   sessionDetail
+}
+
 type deletionResult struct {
 	Path          string
 	Branch        string
@@ -89,8 +94,8 @@ type repositoryDiscoveryMsg struct {
 }
 
 type sessionStatusMsg struct {
-	claude      map[string]map[string]bool
-	codex       map[string]int
+	claude      map[string]map[string]sessionDetail
+	codex       map[string][]sessionDetail
 	claudeKnown bool
 	codexKnown  bool
 }
@@ -135,8 +140,8 @@ type model struct {
 	discoveryDone       int
 	discoveryErr        error
 	sessionsPending     bool
-	claudeSessions      map[string]map[string]bool
-	codexSessions       map[string]int
+	claudeSessions      map[string]map[string]sessionDetail
+	codexSessions       map[string][]sessionDetail
 	claudeSessionsKnown bool
 	codexSessionsKnown  bool
 }
@@ -556,6 +561,7 @@ func (m model) pageSize() int {
 	if len(m.modificationQueue) > 0 {
 		size--
 	}
+	size -= m.sessionDetailsHeight()
 	if m.compactRows() {
 		size /= m.compactRowHeight()
 	}
@@ -820,6 +826,7 @@ func (m model) browseView() string {
 		}
 		output.WriteString(truncate(branchDetails, m.width))
 		output.WriteByte('\n')
+		output.WriteString(sessionDetailsView(item.Sessions, m.width))
 	}
 	return output.String()
 }
@@ -838,6 +845,63 @@ func sessionLabel(sessions sessionCounts) string {
 		warning = " !"
 	}
 	return fmt.Sprintf("C%s X%s%s", claude, codex, warning)
+}
+
+func (m model) sessionDetailsHeight() int {
+	if len(m.visible) == 0 {
+		return 0
+	}
+	sessions := m.item(m.visible[m.cursor]).Sessions
+	total := len(sessions.ClaudeSessions) + len(sessions.CodexSessions)
+	if total == 0 {
+		return 0
+	}
+	height := 1 + min(total, 3)
+	if total > 3 {
+		height++
+	}
+	return height
+}
+
+func sessionDetailsView(sessions sessionCounts, width int) string {
+	var details []displayedSession
+	for _, detail := range sessions.ClaudeSessions {
+		details = append(details, displayedSession{provider: "Claude", detail: detail})
+	}
+	for _, detail := range sessions.CodexSessions {
+		details = append(details, displayedSession{provider: "Codex", detail: detail})
+	}
+	if len(details) == 0 {
+		return ""
+	}
+	sort.SliceStable(details, func(i, j int) bool {
+		return details[i].detail.UpdatedAt.After(details[j].detail.UpdatedAt)
+	})
+	var output strings.Builder
+	output.WriteString("Sessions:\n")
+	for _, session := range details[:min(len(details), 3)] {
+		title := cleanSessionText(session.detail.Title)
+		if title == "" {
+			title = "Untitled session"
+		}
+		line := fmt.Sprintf("  %s: %q", session.provider, title)
+		if model := cleanSessionText(session.detail.Model); model != "" {
+			line += " · " + model
+		}
+		if !session.detail.UpdatedAt.IsZero() {
+			line += " · active " + session.detail.UpdatedAt.Format("2006-01-02 15:04")
+		}
+		output.WriteString(truncate(line, width))
+		output.WriteByte('\n')
+	}
+	if len(details) > 3 {
+		output.WriteString(fmt.Sprintf("  +%d more\n", len(details)-3))
+	}
+	return output.String()
+}
+
+func cleanSessionText(value string) string {
+	return strings.Join(strings.Fields(ansi.Strip(value)), " ")
 }
 
 func mergeLabel(item worktree) string {
@@ -898,8 +962,8 @@ func scanRepository(generation int, gitRoot string, gitRoots []string) tea.Cmd {
 
 func scanSessionStatus() tea.Cmd {
 	return func() tea.Msg {
-		var claude map[string]map[string]bool
-		var codex map[string]int
+		var claude map[string]map[string]sessionDetail
+		var codex map[string][]sessionDetail
 		var claudeKnown bool
 		var codexKnown bool
 		var wait sync.WaitGroup
