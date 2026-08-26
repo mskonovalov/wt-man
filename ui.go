@@ -734,16 +734,17 @@ func (m model) browseView() string {
 		pullRequest := pullRequestLabel(item)
 		line := fmt.Sprintf("%s [%s] %-*s %-10s %-10s %-8s %-6s",
 			pointer, checked, m.repositoryWidth, repoName, created, modified, sessions, pullRequest)
+		highlighted := index == m.cursor
 		if compact {
-			output.WriteString(truncate(line, m.width))
+			output.WriteString(tableRowLine(line, m.width, highlighted))
 			output.WriteByte('\n')
-			output.WriteString("      Branch: " + branch + "  PR: " + pullRequest)
+			output.WriteString(tableRowLine("      Branch: "+branch+"  PR: "+pullRequest, m.width, highlighted))
 		} else {
 			line += fmt.Sprintf(" %-*s", m.branchWidth, branch)
 			if pathWidth > 0 {
 				line += " " + truncate(item.Path, pathWidth)
 			}
-			output.WriteString(truncate(line, m.width))
+			output.WriteString(tableRowLine(line, m.width, highlighted))
 		}
 		output.WriteByte('\n')
 	}
@@ -1144,4 +1145,12 @@ func truncate(value string, width int) string {
 		return "…"
 	}
 	return string(runes[:width-1]) + "…"
+}
+
+func tableRowLine(value string, width int, highlighted bool) string {
+	value = truncate(value, width)
+	if highlighted {
+		return "\x1b[1;7m" + value + "\x1b[0m"
+	}
+	return value
 }
