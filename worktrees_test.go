@@ -36,11 +36,26 @@ func TestParseWorktrees(t *testing.T) {
 	if !items[0].Bare {
 		t.Fatalf("bare worktree marker was not parsed: %#v", items[0])
 	}
-	if items[1].Branch != "feature/test" || !items[1].Locked || items[1].LockReason != "reason" {
+	if items[1].Head != "def456" || items[1].Branch != "feature/test" || !items[1].Locked || items[1].LockReason != "reason" {
 		t.Fatalf("unexpected linked worktree: %#v", items[1])
 	}
 	if !items[2].Detached || !items[2].Prunable {
 		t.Fatalf("unexpected detached worktree: %#v", items[2])
+	}
+}
+
+func TestGitHubRepositoryFromOrigin(t *testing.T) {
+	ctx := context.Background()
+	repoPath := t.TempDir()
+	if _, err := git(ctx, repoPath, "init"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "remote", "add", "origin", "git@github.com:example/wt-man.git"); err != nil {
+		t.Fatal(err)
+	}
+	owner, name, ok := githubRepository(ctx, repoPath)
+	if !ok || owner != "example" || name != "wt-man" {
+		t.Fatalf("unexpected GitHub repository: %q/%q, %v", owner, name, ok)
 	}
 }
 
@@ -72,7 +87,7 @@ func TestDiscoverAndRemoveExistingAndMissingWorktrees(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	repositories, err := discover(ctx, root)
+	repositories, _, err := discover(ctx, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +143,7 @@ func TestDiscoverUsesBareRepositoryAsPrimaryPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	repositories, err := discover(ctx, root)
+	repositories, _, err := discover(ctx, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +173,7 @@ func TestDiscoverUsesWorktreePathWithSeparateGitDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	repositories, err := discover(ctx, root)
+	repositories, _, err := discover(ctx, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,6 +351,30 @@ func TestModelFiltersAndSelectsVisibleRows(t *testing.T) {
 	}
 }
 
+func TestModelFiltersByMergeStatus(t *testing.T) {
+	m := newModel([]repository{{
+		Name: "example",
+		Worktrees: []worktree{
+			{Path: "/tmp/merged", MergeKnown: true, Merged: true},
+			{Path: "/tmp/not-merged", MergeKnown: true},
+			{Path: "/tmp/unknown"},
+		},
+	}})
+	want := []string{"/tmp/merged", "/tmp/not-merged", "/tmp/unknown"}
+	for index, path := range want {
+		updated, _ := m.updateKey("m")
+		m = updated.(model)
+		if len(m.visible) != 1 || m.item(m.visible[0]).Path != path {
+			t.Fatalf("cycle %d returned %#v, want %s", index+1, m.visible, path)
+		}
+	}
+	updated, _ := m.updateKey("m")
+	m = updated.(model)
+	if len(m.visible) != 3 {
+		t.Fatalf("all merge statuses returned %d rows, want 3", len(m.visible))
+	}
+}
+
 func TestModelUsesFullRepositoryNameWidth(t *testing.T) {
 	m := newModel([]repository{
 		{Name: "short", Worktrees: []worktree{{Path: "/tmp/one"}}},
@@ -395,6 +434,18 @@ func TestModelShowsMergeTargetAndStatus(t *testing.T) {
 	view := m.browseView()
 	if !strings.Contains(view, "MERGED") || !strings.Contains(view, "Merged into origin/main: yes") {
 		t.Fatalf("merge status was not rendered: %q", view)
+	}
+}
+
+func TestModelWarnsWhenGitHubAuthenticationIsUnavailable(t *testing.T) {
+	m := newModel([]repository{{
+		Name:      "example",
+		Worktrees: []worktree{{Path: "/tmp/example"}},
+	}})
+	m.githubAuthAvailable = false
+
+	if view := m.browseView(); !strings.Contains(view, "Warning: GitHub authentication unavailable") {
+		t.Fatalf("GitHub authentication warning was not rendered: %q", view)
 	}
 }
 

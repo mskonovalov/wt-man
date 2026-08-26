@@ -31,6 +31,7 @@ Keys:
 - a: select or clear all visible worktrees
 - /: filter by repository, branch, or path
 - u: cycle between all, with unarchived sessions, and without unarchived sessions
+- m: cycle between all, merged, not merged, and unknown merge status
 - r: refresh the selected worktree's modified date
 - R: refresh all modified dates
 - Enter: review selected worktrees
@@ -47,5 +48,6 @@ Date scans process one worktree at a time and show progress above the list. Dele
 Repository and branch columns expand to show their full values. The path column uses the remaining terminal width and is hidden when space is limited; on narrower terminals, the full branch moves onto a second line. The selected worktree's full details remain below the list.
 
 The merged column checks whether the local branch tip is already contained in the repository's locally available default branch ref. It prefers `origin/HEAD`, then falls back to `origin/main`, `origin/master`, `main`, or `master`; run `git fetch` first when you need current remote state. A merged branch can still have uncommitted worktree changes, so this is evidence about committed history rather than a complete safety guarantee.
+When a GitHub token is available through `GH_TOKEN`, `GITHUB_TOKEN`, or the authenticated `gh` credential store, one bounded GitHub GraphQL request checks the discovered branch-tip commits for merged pull requests, including squash merges and deleted remote branches. The request uses GitHub's Go API client rather than invoking `gh api`. A GitHub result overrides local `no` only when the PR's stored head branch, head SHA, and base branch all match; otherwise the local Git result is retained.
 
 Claude session status is read from Claude Desktop's local session JSON files. Codex status is read from its local SQLite state database when sqlite3 is available. These are internal formats, so session detection is best-effort. `C?` or `X?` means that provider could not be checked; the "without unarchived" filter only shows a worktree when both providers were checked successfully.

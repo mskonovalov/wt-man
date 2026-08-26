@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/charlievieth/fastwalk"
+	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/cli/go-gh/v2/pkg/auth"
 )
 
 type sessionCounts struct {
@@ -34,19 +36,21 @@ type modificationCacheEntry struct {
 const modificationCacheTTL = 24 * time.Hour
 
 type worktree struct {
-	Path       string
-	Branch     string
-	Detached   bool
-	Locked     bool
-	LockReason string
-	Prunable   bool
-	Bare       bool
-	Missing    bool
-	Merged     bool
-	MergeKnown bool
-	CreatedAt  time.Time
-	ModifiedAt time.Time
-	Sessions   sessionCounts
+	Path        string
+	Branch      string
+	Head        string
+	Detached    bool
+	Locked      bool
+	LockReason  string
+	Prunable    bool
+	Bare        bool
+	Missing     bool
+	Merged      bool
+	MergeKnown  bool
+	MergeSource string
+	CreatedAt   time.Time
+	ModifiedAt  time.Time
+	Sessions    sessionCounts
 }
 
 type repository struct {
@@ -60,10 +64,10 @@ var ignoredDirectories = map[string]bool{
 	".cache": true, ".yarn": true, "node_modules": true, "vendor": true,
 }
 
-func discover(ctx context.Context, root string) ([]repository, error) {
+func discover(ctx context.Context, root string) ([]repository, bool, error) {
 	root, err := canonicalPath(root)
 	if err != nil {
-		return nil, fmt.Errorf("resolve root: %w", err)
+		return nil, false, fmt.Errorf("resolve root: %w", err)
 	}
 
 	var gitRoots []string
@@ -88,7 +92,7 @@ func discover(ctx context.Context, root string) ([]repository, error) {
 	}()
 	wait.Wait()
 	if rootsErr != nil {
-		return nil, rootsErr
+		return nil, false, rootsErr
 	}
 
 	seen := make(map[string]bool)
@@ -134,6 +138,7 @@ func discover(ctx context.Context, root string) ([]repository, error) {
 			if item.Branch != "" && mergeTarget != "" {
 				item.Merged = merged[item.Branch]
 				item.MergeKnown = true
+				item.MergeSource = "Git"
 			}
 			linked = append(linked, item)
 		}
@@ -158,7 +163,8 @@ func discover(ctx context.Context, root string) ([]repository, error) {
 		return repositories[i].Name < repositories[j].Name
 	})
 	assignSessions(repositories, claude, codex, claudeKnown, codexKnown)
-	return repositories, nil
+	githubAuthenticated := overlayGitHubMerged(ctx, repositories)
+	return repositories, githubAuthenticated, nil
 }
 
 func findPrimaryWorktreePaths(ctx context.Context, gitRoots []string) map[string]string {
@@ -274,6 +280,106 @@ func containingWorktree(repositories []repository, path string) (int, int, bool)
 	return bestRepository, bestWorktree, bestLength >= 0
 }
 
+func overlayGitHubMerged(ctx context.Context, repositories []repository) bool {
+	type repositoryQuery struct {
+		rows map[string]row
+	}
+	queries := make(map[string]repositoryQuery)
+	var query strings.Builder
+	query.WriteString("query {")
+	for repositoryIndex, repo := range repositories {
+		owner, name, ok := githubRepository(ctx, repo.MainPath)
+		if !ok {
+			continue
+		}
+		repositoryAlias := fmt.Sprintf("r%d", repositoryIndex)
+		current := repositoryQuery{rows: make(map[string]row)}
+		var commitsQuery strings.Builder
+		for worktreeIndex, item := range repo.Worktrees {
+			if item.Branch == "" || item.Head == "" {
+				continue
+			}
+			commitAlias := fmt.Sprintf("c%d", worktreeIndex)
+			current.rows[commitAlias] = row{repository: repositoryIndex, worktree: worktreeIndex}
+			fmt.Fprintf(&commitsQuery, "%s: object(oid:%q) { ... on Commit { associatedPullRequests(first:10) { nodes { mergedAt baseRefName headRefName headRefOid } } } }", commitAlias, item.Head)
+		}
+		if len(current.rows) > 0 {
+			fmt.Fprintf(&query, "%s: repository(owner:%q,name:%q) {%s}", repositoryAlias, owner, name, commitsQuery.String())
+			queries[repositoryAlias] = current
+		}
+	}
+	query.WriteString("}")
+	token, _ := auth.TokenForHost("github.com")
+	if token == "" {
+		return false
+	}
+	if len(queries) == 0 {
+		return true
+	}
+	client, err := api.NewGraphQLClient(api.ClientOptions{Host: "github.com", AuthToken: token})
+	if err != nil {
+		return true
+	}
+
+	apiContext, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	response := make(map[string]json.RawMessage)
+	if client.DoWithContext(apiContext, query.String(), nil, &response) != nil {
+		return true
+	}
+	for repositoryAlias, repositoryQuery := range queries {
+		var commits map[string]struct {
+			AssociatedPullRequests struct {
+				Nodes []struct {
+					MergedAt    *time.Time `json:"mergedAt"`
+					BaseRefName string     `json:"baseRefName"`
+					HeadRefName string     `json:"headRefName"`
+					HeadRefOID  string     `json:"headRefOid"`
+				} `json:"nodes"`
+			} `json:"associatedPullRequests"`
+		}
+		if json.Unmarshal(response[repositoryAlias], &commits) != nil {
+			continue
+		}
+		for commitAlias, current := range repositoryQuery.rows {
+			item := &repositories[current.repository].Worktrees[current.worktree]
+			base := strings.TrimPrefix(repositories[current.repository].MergeTarget, "origin/")
+			for _, pullRequest := range commits[commitAlias].AssociatedPullRequests.Nodes {
+				if pullRequest.MergedAt != nil && pullRequest.BaseRefName == base && pullRequest.HeadRefName == item.Branch && pullRequest.HeadRefOID == item.Head {
+					item.Merged = true
+					item.MergeKnown = true
+					item.MergeSource = "GitHub"
+					break
+				}
+			}
+		}
+	}
+	return true
+}
+
+func githubRepository(ctx context.Context, directory string) (string, string, bool) {
+	remote, err := git(ctx, directory, "remote", "get-url", "origin")
+	if err != nil {
+		return "", "", false
+	}
+	var path string
+	for _, prefix := range []string{"git@github.com:", "https://github.com/", "http://github.com/", "ssh://git@github.com/"} {
+		if strings.HasPrefix(remote, prefix) {
+			path = strings.TrimPrefix(remote, prefix)
+			break
+		}
+	}
+	if path == "" {
+		return "", "", false
+	}
+	path = strings.TrimSuffix(path, ".git")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
 func findGitRoots(root string) ([]string, error) {
 	var roots []string
 	var visit func(string) error
@@ -362,6 +468,8 @@ func parseWorktrees(output string) ([]worktree, error) {
 			return nil, fmt.Errorf("invalid git worktree output: %q", line)
 		}
 		switch {
+		case strings.HasPrefix(line, "HEAD "):
+			current.Head = strings.TrimPrefix(line, "HEAD ")
 		case strings.HasPrefix(line, "branch refs/heads/"):
 			current.Branch = strings.TrimPrefix(line, "branch refs/heads/")
 		case line == "detached":
