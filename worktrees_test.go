@@ -82,7 +82,7 @@ func TestDiscoverAndRemoveExistingAndMissingWorktrees(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	repositories, err := discover(ctx, root)
+	repositories, _, err := discover(ctx, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,6 +228,18 @@ func TestModelShowsMergeTargetAndStatus(t *testing.T) {
 	view := m.browseView()
 	if !strings.Contains(view, "MERGED") || !strings.Contains(view, "Merged into origin/main: yes") {
 		t.Fatalf("merge status was not rendered: %q", view)
+	}
+}
+
+func TestModelWarnsWhenGitHubAuthenticationIsUnavailable(t *testing.T) {
+	m := newModel([]repository{{
+		Name:      "example",
+		Worktrees: []worktree{{Path: "/tmp/example"}},
+	}})
+	m.githubAuthAvailable = false
+
+	if view := m.browseView(); !strings.Contains(view, "Warning: GitHub authentication unavailable") {
+		t.Fatalf("GitHub authentication warning was not rendered: %q", view)
 	}
 }
 

@@ -60,10 +60,10 @@ var ignoredDirectories = map[string]bool{
 	".cache": true, ".yarn": true, "node_modules": true, "vendor": true,
 }
 
-func discover(ctx context.Context, root string) ([]repository, error) {
+func discover(ctx context.Context, root string) ([]repository, bool, error) {
 	root, err := canonicalPath(root)
 	if err != nil {
-		return nil, fmt.Errorf("resolve root: %w", err)
+		return nil, false, fmt.Errorf("resolve root: %w", err)
 	}
 
 	var gitRoots []string
@@ -86,7 +86,7 @@ func discover(ctx context.Context, root string) ([]repository, error) {
 	}()
 	wait.Wait()
 	if rootsErr != nil {
-		return nil, rootsErr
+		return nil, false, rootsErr
 	}
 
 	seen := make(map[string]bool)
@@ -104,7 +104,7 @@ func discover(ctx context.Context, root string) ([]repository, error) {
 
 		output, err := git(ctx, gitRoot, "worktree", "list", "--porcelain")
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		mainPath, err := canonicalPath(filepath.Dir(commonDirectory))
 		if err != nil {
@@ -112,7 +112,7 @@ func discover(ctx context.Context, root string) ([]repository, error) {
 		}
 		items, err := parseWorktrees(output)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		merged, mergeTarget := mergedBranches(ctx, gitRoot)
 
@@ -154,8 +154,8 @@ func discover(ctx context.Context, root string) ([]repository, error) {
 	sort.Slice(repositories, func(i, j int) bool {
 		return repositories[i].Name < repositories[j].Name
 	})
-	overlayGitHubMerged(ctx, repositories)
-	return repositories, nil
+	githubAuthenticated := overlayGitHubMerged(ctx, repositories)
+	return repositories, githubAuthenticated, nil
 }
 
 func mergedBranches(ctx context.Context, directory string) (map[string]bool, string) {
@@ -184,7 +184,7 @@ func mergedBranches(ctx context.Context, directory string) (map[string]bool, str
 	return merged, target
 }
 
-func overlayGitHubMerged(ctx context.Context, repositories []repository) {
+func overlayGitHubMerged(ctx context.Context, repositories []repository) bool {
 	type repositoryQuery struct {
 		rows map[string]row
 	}
@@ -213,23 +213,23 @@ func overlayGitHubMerged(ctx context.Context, repositories []repository) {
 		}
 	}
 	query.WriteString("}")
-	if len(queries) == 0 {
-		return
-	}
 	token, _ := auth.TokenForHost("github.com")
 	if token == "" {
-		return
+		return false
+	}
+	if len(queries) == 0 {
+		return true
 	}
 	client, err := api.NewGraphQLClient(api.ClientOptions{Host: "github.com", AuthToken: token})
 	if err != nil {
-		return
+		return true
 	}
 
 	apiContext, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	response := make(map[string]json.RawMessage)
 	if client.DoWithContext(apiContext, query.String(), nil, &response) != nil {
-		return
+		return true
 	}
 	for repositoryAlias, repositoryQuery := range queries {
 		var commits map[string]struct {
@@ -258,6 +258,7 @@ func overlayGitHubMerged(ctx context.Context, repositories []repository) {
 			}
 		}
 	}
+	return true
 }
 
 func githubRepository(ctx context.Context, directory string) (string, string, bool) {

@@ -52,29 +52,30 @@ type modificationTimeMsg struct {
 }
 
 type model struct {
-	repositories      []repository
-	rows              []row
-	visible           []row
-	selected          map[string]bool
-	cursor            int
-	offset            int
-	width             int
-	height            int
-	query             string
-	filtering         bool
-	screen            screen
-	deleteBranches    bool
-	results           []deletionResult
-	repositoryWidth   int
-	branchWidth       int
-	sessionMode       sessionMode
-	modificationQueue []row
-	modificationTotal int
-	modificationDone  int
-	deletionQueue     []row
-	deletionTotal     int
-	deletionWaiting   bool
-	generation        int
+	repositories        []repository
+	rows                []row
+	visible             []row
+	selected            map[string]bool
+	cursor              int
+	offset              int
+	width               int
+	height              int
+	query               string
+	filtering           bool
+	screen              screen
+	deleteBranches      bool
+	results             []deletionResult
+	repositoryWidth     int
+	branchWidth         int
+	sessionMode         sessionMode
+	modificationQueue   []row
+	modificationTotal   int
+	modificationDone    int
+	deletionQueue       []row
+	deletionTotal       int
+	deletionWaiting     bool
+	githubAuthAvailable bool
+	generation          int
 }
 
 func newModel(repositories []repository) model {
@@ -323,6 +324,9 @@ func (m model) pageSize() int {
 		return 1
 	}
 	size := m.height - 12
+	if !m.githubAuthAvailable {
+		size--
+	}
 	if m.compactRows() {
 		size /= 2
 	}
@@ -405,6 +409,7 @@ func (m model) returnToList() (tea.Model, tea.Cmd) {
 	refreshed.height = m.height
 	refreshed.query = m.query
 	refreshed.sessionMode = m.sessionMode
+	refreshed.githubAuthAvailable = m.githubAuthAvailable
 	refreshed.generation = m.generation + 1
 	refreshed.applyFilter()
 	return refreshed, refreshed.Init()
@@ -433,6 +438,10 @@ func (m model) browseView() string {
 		len(m.visible), len(m.selectedRows()), m.sessionMode.label())
 	output.WriteString(truncate(m.modificationProgressView(), m.width))
 	output.WriteByte('\n')
+	if !m.githubAuthAvailable {
+		output.WriteString(truncate("Warning: GitHub authentication unavailable; merged status uses local Git only. Set GH_TOKEN or run gh auth login.", m.width))
+		output.WriteByte('\n')
+	}
 	if m.filtering {
 		fmt.Fprintf(&output, "Filter: %s█\n\n", m.query)
 	} else if m.query != "" {
