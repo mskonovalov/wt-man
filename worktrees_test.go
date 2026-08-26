@@ -45,17 +45,24 @@ func TestParseWorktrees(t *testing.T) {
 }
 
 func TestGitHubRepositoryFromOrigin(t *testing.T) {
-	ctx := context.Background()
-	repoPath := t.TempDir()
-	if _, err := git(ctx, repoPath, "init"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := git(ctx, repoPath, "remote", "add", "origin", "git@github.com:example/wt-man.git"); err != nil {
-		t.Fatal(err)
-	}
-	owner, name, ok := githubRepository(ctx, repoPath)
-	if !ok || owner != "example" || name != "wt-man" {
-		t.Fatalf("unexpected GitHub repository: %q/%q, %v", owner, name, ok)
+	for _, remote := range []string{
+		"git@github.com:example/wt-man.git",
+		"ssh://git@ssh.github.com:443/example/wt-man.git",
+	} {
+		t.Run(remote, func(t *testing.T) {
+			ctx := context.Background()
+			repoPath := t.TempDir()
+			if _, err := git(ctx, repoPath, "init"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := git(ctx, repoPath, "remote", "add", "origin", remote); err != nil {
+				t.Fatal(err)
+			}
+			owner, name, ok := githubRepository(ctx, repoPath)
+			if !ok || owner != "example" || name != "wt-man" {
+				t.Fatalf("unexpected GitHub repository: %q/%q, %v", owner, name, ok)
+			}
+		})
 	}
 }
 

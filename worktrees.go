@@ -343,7 +343,7 @@ func githubRepository(ctx context.Context, directory string) (string, string, bo
 		return "", "", false
 	}
 	var path string
-	for _, prefix := range []string{"git@github.com:", "https://github.com/", "http://github.com/", "ssh://git@github.com/"} {
+	for _, prefix := range []string{"git@github.com:", "https://github.com/", "http://github.com/", "ssh://git@github.com/", "ssh://git@ssh.github.com:443/"} {
 		if strings.HasPrefix(remote, prefix) {
 			path = strings.TrimPrefix(remote, prefix)
 			break
