@@ -20,21 +20,21 @@ const (
 	resultsScreen
 )
 
-type safetyMode int
+type sessionMode int
 
 const (
-	allSafetyStatuses safetyMode = iota
-	safeOnly
-	notSafeOnly
-	checkingOnly
+	allSessions sessionMode = iota
+	withUnarchivedSessions
+	withoutUnarchivedSessions
 )
 
-type safetyState int
+type mergeMode int
 
 const (
-	safetyChecking safetyState = iota
-	safetySafe
-	safetyNotSafe
+	allMergeStatuses mergeMode = iota
+	mergedOnly
+	notMergedOnly
+	unknownMergeStatus
 )
 
 type row struct {
@@ -59,13 +59,6 @@ type modificationTimeMsg struct {
 	generation int
 	row        row
 	modifiedAt time.Time
-}
-
-type changesStatusMsg struct {
-	generation int
-	row        row
-	hasChanges bool
-	known      bool
 }
 
 type mergeStatusMsg struct {
@@ -97,13 +90,11 @@ type model struct {
 	results             []deletionResult
 	repositoryWidth     int
 	branchWidth         int
-	safetyMode          safetyMode
+	sessionMode         sessionMode
+	mergeMode           mergeMode
 	modificationQueue   []row
 	modificationTotal   int
 	modificationDone    int
-	changesQueue        []row
-	changesTotal        int
-	changesDone         int
 	mergeQueue          []int
 	mergeTotal          int
 	mergeDone           int
@@ -147,17 +138,7 @@ func newModel(repositories []repository) model {
 			}
 			current := row{repository: repositoryIndex, worktree: worktreeIndex}
 			m.rows = append(m.rows, current)
-			item := &m.repositories[repositoryIndex].Worktrees[worktreeIndex]
-			if item.Missing {
-				item.ChangesChecked = true
-				item.ChangesKnown = true
-			} else {
-				m.changesQueue = append(m.changesQueue, current)
-			}
-			if item.Branch == "" {
-				item.MergeChecked = true
-			}
-			if !item.Missing {
+			if !repo.Worktrees[worktreeIndex].Missing {
 				entry := cache[repo.Worktrees[worktreeIndex].Path]
 				if entry.ScannedAt.After(cacheCutoff) {
 					m.repositories[repositoryIndex].Worktrees[worktreeIndex].ModifiedAt = entry.ModifiedAt
@@ -168,7 +149,6 @@ func newModel(repositories []repository) model {
 		}
 	}
 	m.modificationTotal = len(m.modificationQueue)
-	m.changesTotal = len(m.changesQueue)
 	m.mergeTotal = len(m.mergeQueue)
 	m.githubMergePending = len(m.mergeQueue) == 0
 	m.visible = append([]row(nil), m.rows...)
@@ -180,10 +160,6 @@ func (m model) Init() tea.Cmd {
 	if len(m.modificationQueue) > 0 {
 		current := m.modificationQueue[0]
 		commands = append(commands, scanModificationTime(m.generation, current, m.item(current).Path))
-	}
-	if len(m.changesQueue) > 0 {
-		current := m.changesQueue[0]
-		commands = append(commands, scanChangesStatus(m.generation, current, m.item(current).Path))
 	}
 	if len(m.mergeQueue) > 0 {
 		commands = append(commands, scanMergeStatus(m.generation, m.mergeQueue[0], m.repositories[m.mergeQueue[0]].MainPath))
@@ -224,24 +200,6 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		current := m.modificationQueue[0]
 		return m, scanModificationTime(m.generation, current, m.item(current).Path)
-	case changesStatusMsg:
-		if message.generation != m.generation {
-			return m, nil
-		}
-		item := &m.repositories[message.row.repository].Worktrees[message.row.worktree]
-		item.ChangesChecked = true
-		item.ChangesKnown = message.known
-		item.HasChanges = message.hasChanges
-		m.changesQueue = m.changesQueue[1:]
-		m.changesDone++
-		if m.safetyMode != allSafetyStatuses {
-			m.applyFilter()
-		}
-		if len(m.changesQueue) == 0 {
-			return m, nil
-		}
-		current := m.changesQueue[0]
-		return m, scanChangesStatus(m.generation, current, m.item(current).Path)
 	case mergeStatusMsg:
 		if message.generation != m.generation {
 			return m, nil
@@ -250,7 +208,6 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		repo.MergeTarget = message.target
 		for worktreeIndex := range repo.Worktrees {
 			item := &repo.Worktrees[worktreeIndex]
-			item.MergeChecked = true
 			if item.Branch != "" && message.target != "" {
 				item.Merged = message.merged[item.Branch]
 				item.MergeKnown = true
@@ -259,7 +216,7 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.mergeQueue = m.mergeQueue[1:]
 		m.mergeDone++
-		if m.safetyMode != allSafetyStatuses {
+		if m.mergeMode != allMergeStatuses {
 			m.applyFilter()
 		}
 		if len(m.mergeQueue) > 0 {
@@ -277,12 +234,11 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.githubAuthAvailable = message.authenticated
 		for _, current := range message.merged {
 			item := &m.repositories[current.repository].Worktrees[current.worktree]
-			item.MergeChecked = true
 			item.Merged = true
 			item.MergeKnown = true
 			item.MergeSource = "GitHub"
 		}
-		if m.safetyMode != allSafetyStatuses {
+		if m.mergeMode != allMergeStatuses {
 			m.applyFilter()
 		}
 		return m, nil
@@ -320,9 +276,6 @@ func (m model) updateKey(key string) (tea.Model, tea.Cmd) {
 		case "x":
 			m.deleteBranches = !m.deleteBranches
 		case "D":
-			if m.selectedSafetyChecking() {
-				return m, nil
-			}
 			m.screen = deletingScreen
 			m.results = nil
 			m.deletionQueue = m.selectedRows()
@@ -364,8 +317,11 @@ func (m model) updateKey(key string) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "/":
 		m.filtering = true
-	case "s":
-		m.safetyMode = (m.safetyMode + 1) % 4
+	case "u":
+		m.sessionMode = (m.sessionMode + 1) % 3
+		m.applyFilter()
+	case "m":
+		m.mergeMode = (m.mergeMode + 1) % 4
 		m.applyFilter()
 	case "r":
 		if len(m.visible) > 0 {
@@ -415,12 +371,16 @@ func (m *model) applyFilter() {
 		repo := m.repositories[current.repository]
 		item := repo.Worktrees[current.worktree]
 		haystack := strings.ToLower(repo.Name + " " + item.Branch + " " + item.Path)
-		state, _ := m.safety(current)
-		safetyMatches := m.safetyMode == allSafetyStatuses ||
-			(m.safetyMode == safeOnly && state == safetySafe) ||
-			(m.safetyMode == notSafeOnly && state == safetyNotSafe) ||
-			(m.safetyMode == checkingOnly && state == safetyChecking)
-		if strings.Contains(haystack, query) && safetyMatches {
+		hasUnarchived := item.Sessions.Claude+item.Sessions.Codex > 0
+		absenceKnown := item.Sessions.ClaudeKnown && item.Sessions.CodexKnown
+		sessionMatches := m.sessionMode == allSessions ||
+			(m.sessionMode == withUnarchivedSessions && hasUnarchived) ||
+			(m.sessionMode == withoutUnarchivedSessions && absenceKnown && !hasUnarchived)
+		mergeMatches := m.mergeMode == allMergeStatuses ||
+			(m.mergeMode == mergedOnly && item.MergeKnown && item.Merged) ||
+			(m.mergeMode == notMergedOnly && item.MergeKnown && !item.Merged) ||
+			(m.mergeMode == unknownMergeStatus && !item.MergeKnown)
+		if strings.Contains(haystack, query) && sessionMatches && mergeMatches {
 			m.visible = append(m.visible, current)
 		}
 	}
@@ -451,72 +411,16 @@ func (m model) selectedRows() []row {
 	return selected
 }
 
-func (m model) selectedSafetyChecking() bool {
-	for _, current := range m.selectedRows() {
-		state, _ := m.safety(current)
-		if state == safetyChecking {
-			return true
-		}
-	}
-	return false
-}
-
 func (m model) item(current row) worktree {
 	return m.repositories[current.repository].Worktrees[current.worktree]
-}
-
-func (m model) safety(current row) (safetyState, []string) {
-	item := m.item(current)
-	if !item.ChangesChecked || !item.MergeChecked ||
-		(item.Branch != "" && !item.Merged && !m.githubAuthChecked) {
-		return safetyChecking, nil
-	}
-	var reasons []string
-	if item.Locked {
-		reasons = append(reasons, "worktree is locked")
-	}
-	if !item.ChangesKnown {
-		reasons = append(reasons, "local changes could not be checked")
-	} else if item.HasChanges {
-		reasons = append(reasons, "has local changes")
-	}
-	if !item.Sessions.ClaudeKnown || !item.Sessions.CodexKnown {
-		reasons = append(reasons, "session status is unknown")
-	}
-	if item.Sessions.Claude+item.Sessions.Codex > 0 {
-		reasons = append(reasons, "has unarchived sessions")
-	}
-	if !item.MergeKnown {
-		reasons = append(reasons, "committed work could not be checked")
-	} else if !item.Merged {
-		reasons = append(reasons, "committed work is not in the default branch")
-	}
-	if len(reasons) > 0 {
-		return safetyNotSafe, reasons
-	}
-	return safetySafe, nil
-}
-
-func safetyLabel(state safetyState) string {
-	switch state {
-	case safetySafe:
-		return "yes"
-	case safetyNotSafe:
-		return "NO"
-	default:
-		return "…"
-	}
 }
 
 func (m model) pageSize() int {
 	if m.height < 13 {
 		return 1
 	}
-	size := m.height - 11
+	size := m.height - 12
 	if len(m.modificationQueue) > 0 {
-		size--
-	}
-	if m.safetyProgressView() != "" {
 		size--
 	}
 	if m.compactRows() {
@@ -539,7 +443,7 @@ func (m model) compactRowHeight() int {
 		if branch == "" {
 			branch = "detached"
 		}
-		lineWidth := ansi.StringWidth("      Branch: " + branch)
+		lineWidth := ansi.StringWidth("      Branch: " + branch + "  Merged: " + mergeLabel(item))
 		wrapped := (lineWidth + m.width - 1) / m.width
 		if 1+wrapped > height {
 			height = 1 + wrapped
@@ -620,7 +524,8 @@ func (m model) returnToList() (tea.Model, tea.Cmd) {
 	refreshed.width = m.width
 	refreshed.height = m.height
 	refreshed.query = m.query
-	refreshed.safetyMode = m.safetyMode
+	refreshed.sessionMode = m.sessionMode
+	refreshed.mergeMode = m.mergeMode
 	refreshed.generation = m.generation + 1
 	refreshed.applyFilter()
 	return refreshed, refreshed.Init()
@@ -645,22 +550,20 @@ func (m model) View() tea.View {
 
 func (m model) browseView() string {
 	var output strings.Builder
-	fmt.Fprintf(&output, "\n\x1b[1mwt-man\x1b[0m  %d worktrees  %d selected  safety: %s\n",
-		len(m.visible), len(m.selectedRows()), m.safetyMode.label())
+	fmt.Fprintf(&output, "\n\x1b[1mwt-man\x1b[0m  %d worktrees  %d selected  sessions: %s  merged: %s\n",
+		len(m.visible), len(m.selectedRows()), m.sessionMode.label(), m.mergeMode.label())
 	if progress := m.modificationProgressView(); progress != "" {
 		output.WriteString(truncate(progress, m.width))
 		output.WriteByte('\n')
 	}
-	if progress := m.safetyProgressView(); progress != "" {
-		output.WriteString(truncate(progress, m.width))
-		output.WriteByte('\n')
-	}
+	output.WriteString(truncate(m.mergeProgressView(), m.width))
+	output.WriteByte('\n')
 	if m.filtering {
 		fmt.Fprintf(&output, "Filter: %s█\n\n", m.query)
 	} else if m.query != "" {
 		fmt.Fprintf(&output, "Filter: %s  (/ to edit)\n\n", m.query)
 	} else {
-		output.WriteString("/ filter  s safety  r refresh  R refresh all  space select  a all  enter review  q quit\n\n")
+		output.WriteString("/ filter  u sessions  m merged  r refresh  R refresh all  space select  a all  enter review  q quit\n\n")
 	}
 
 	end := m.offset + m.pageSize()
@@ -672,13 +575,13 @@ func (m model) browseView() string {
 	var header string
 	if compact {
 		header = fmt.Sprintf("      %-*s %-10s %-10s %-8s %s",
-			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SAFE", "BRANCH")
+			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "MERGED")
 	} else if pathWidth > 0 {
-		header = fmt.Sprintf("      %-*s %-10s %-10s %-8s %-*s %s",
-			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SAFE", m.branchWidth, "BRANCH", "PATH")
+		header = fmt.Sprintf("      %-*s %-10s %-10s %-8s %-6s %-*s %s",
+			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "MERGED", m.branchWidth, "BRANCH", "PATH")
 	} else {
-		header = fmt.Sprintf("      %-*s %-10s %-10s %-8s %s",
-			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SAFE", "BRANCH")
+		header = fmt.Sprintf("      %-*s %-10s %-10s %-8s %-6s %s",
+			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "MERGED", "BRANCH")
 	}
 	output.WriteString(truncate(header, m.width))
 	output.WriteByte('\n')
@@ -716,13 +619,14 @@ func (m model) browseView() string {
 		if branch == "" {
 			branch = "detached"
 		}
-		state, _ := m.safety(current)
-		line := fmt.Sprintf("%s [%s] %-*s %-10s %-10s %-8s",
-			pointer, checked, m.repositoryWidth, repoName, created, modified, safetyLabel(state))
+		sessions := sessionLabel(item.Sessions)
+		merged := mergeLabel(item)
+		line := fmt.Sprintf("%s [%s] %-*s %-10s %-10s %-8s %-6s",
+			pointer, checked, m.repositoryWidth, repoName, created, modified, sessions, merged)
 		if compact {
 			output.WriteString(truncate(line, m.width))
 			output.WriteByte('\n')
-			output.WriteString("      Branch: " + branch)
+			output.WriteString("      Branch: " + branch + "  Merged: " + merged)
 		} else {
 			line += fmt.Sprintf(" %-*s", m.branchWidth, branch)
 			if pathWidth > 0 {
@@ -740,17 +644,6 @@ func (m model) browseView() string {
 		item := m.item(current)
 		output.WriteByte('\n')
 		output.WriteString(truncate("Path: "+item.Path, m.width))
-		output.WriteByte('\n')
-		state, reasons := m.safety(current)
-		safetyDetails := "Safety: NOT SAFE"
-		if state == safetySafe {
-			safetyDetails = "Safety: SAFE"
-		} else if state == safetyChecking {
-			safetyDetails = "Safety: checking…"
-		} else if len(reasons) > 0 {
-			safetyDetails += " — " + strings.Join(reasons, "; ")
-		}
-		output.WriteString(truncate(safetyDetails, m.width))
 		output.WriteByte('\n')
 		branch := item.Branch
 		if branch == "" {
@@ -786,11 +679,40 @@ func (m model) browseView() string {
 	return output.String()
 }
 
+func sessionLabel(sessions sessionCounts) string {
+	claude := "?"
+	if sessions.ClaudeKnown {
+		claude = fmt.Sprint(sessions.Claude)
+	}
+	codex := "?"
+	if sessions.CodexKnown {
+		codex = fmt.Sprint(sessions.Codex)
+	}
+	warning := ""
+	if sessions.Claude+sessions.Codex > 0 || !sessions.ClaudeKnown || !sessions.CodexKnown {
+		warning = " !"
+	}
+	return fmt.Sprintf("C%s X%s%s", claude, codex, warning)
+}
+
+func mergeLabel(item worktree) string {
+	if item.MergeKnown {
+		if item.Merged {
+			return "yes"
+		}
+		return "no"
+	}
+	if item.Branch != "" {
+		return "?"
+	}
+	return "n/a"
+}
+
 func (m model) pathColumnWidth() int {
 	if m.compactRows() {
 		return 0
 	}
-	width := m.width - 38 - m.repositoryWidth - m.branchWidth
+	width := m.width - 46 - m.repositoryWidth - m.branchWidth
 	if width < 12 {
 		return 0
 	}
@@ -798,7 +720,7 @@ func (m model) pathColumnWidth() int {
 }
 
 func (m model) compactRows() bool {
-	return 37+m.repositoryWidth+m.branchWidth > m.width
+	return 45+m.repositoryWidth+m.branchWidth > m.width
 }
 
 func scanModificationTime(generation int, current row, path string) tea.Cmd {
@@ -806,13 +728,6 @@ func scanModificationTime(generation int, current row, path string) tea.Cmd {
 		modifiedAt := modificationTime(path)
 		writeModificationCacheEntry(path, modifiedAt)
 		return modificationTimeMsg{generation: generation, row: current, modifiedAt: modifiedAt}
-	}
-}
-
-func scanChangesStatus(generation int, current row, path string) tea.Cmd {
-	return func() tea.Msg {
-		hasChanges, known := worktreeChanges(context.Background(), path)
-		return changesStatusMsg{generation: generation, row: current, hasChanges: hasChanges, known: known}
 	}
 }
 
@@ -845,31 +760,40 @@ func (m model) modificationProgressView() string {
 		progressBar(m.modificationDone, m.modificationTotal, 20), m.modificationDone, m.modificationTotal, item.Path)
 }
 
-func (m model) safetyProgressView() string {
-	if len(m.changesQueue) > 0 {
-		item := m.item(m.changesQueue[0])
-		return fmt.Sprintf("Safety check %s %d/%d  %s",
-			progressBar(m.changesDone, m.changesTotal, 20), m.changesDone, m.changesTotal, item.Path)
-	}
+func (m model) mergeProgressView() string {
 	if len(m.mergeQueue) > 0 {
 		repo := m.repositories[m.mergeQueue[0]]
-		return fmt.Sprintf("Safety check %s %d/%d  %s",
+		return fmt.Sprintf("Merge check %s %d/%d  %s",
 			progressBar(m.mergeDone, m.mergeTotal, 20), m.mergeDone, m.mergeTotal, repo.Name)
 	}
 	if m.githubMergePending {
-		return "Safety check: querying GitHub"
+		return "Merge check: querying GitHub"
 	}
-	return ""
+	if m.githubAuthChecked && !m.githubAuthAvailable {
+		return "Warning: GitHub authentication unavailable; merged status uses local Git only. Set GH_TOKEN or run gh auth login."
+	}
+	return "Merge check: complete"
 }
 
-func (mode safetyMode) label() string {
+func (mode sessionMode) label() string {
 	switch mode {
-	case safeOnly:
-		return "safe"
-	case notSafeOnly:
-		return "not safe"
-	case checkingOnly:
-		return "checking"
+	case withUnarchivedSessions:
+		return "with unarchived"
+	case withoutUnarchivedSessions:
+		return "without unarchived"
+	default:
+		return "all"
+	}
+}
+
+func (mode mergeMode) label() string {
+	switch mode {
+	case mergedOnly:
+		return "merged"
+	case notMergedOnly:
+		return "not merged"
+	case unknownMergeStatus:
+		return "unknown"
 	default:
 		return "all"
 	}
@@ -890,17 +814,9 @@ func (m model) reviewView() string {
 		}
 		repo := m.repositories[current.repository]
 		item := repo.Worktrees[current.worktree]
-		state, reasons := m.safety(current)
-		fmt.Fprintf(&output, "  [%s] %s  ", repo.Name, item.Path)
-		if state == safetySafe {
-			output.WriteString("\x1b[32mSAFE\x1b[0m")
-		} else if state == safetyChecking {
-			output.WriteString("\x1b[33mCHECKING\x1b[0m")
-		} else {
-			fmt.Fprintf(&output, "\x1b[31mNOT SAFE: %s\x1b[0m", strings.Join(reasons, "; "))
-		}
+		fmt.Fprintf(&output, "  [%s] %s", repo.Name, item.Path)
 		if item.Locked {
-			output.WriteString("  \x1b[31mwill not delete")
+			output.WriteString("  \x1b[31mLOCKED: will not delete")
 			if item.LockReason != "" {
 				output.WriteString(" (" + item.LockReason + ")")
 			}
@@ -913,17 +829,33 @@ func (m model) reviewView() string {
 				output.WriteString("  delete files and Git record")
 			}
 		}
+		if item.Sessions.Claude+item.Sessions.Codex > 0 {
+			var active []string
+			if item.Sessions.Claude > 0 {
+				active = append(active, fmt.Sprintf("Claude %d", item.Sessions.Claude))
+			}
+			if item.Sessions.Codex > 0 {
+				active = append(active, fmt.Sprintf("Codex %d", item.Sessions.Codex))
+			}
+			fmt.Fprintf(&output, "  \x1b[33m%s unarchived\x1b[0m", strings.Join(active, ", "))
+		}
+		if !item.Sessions.ClaudeKnown || !item.Sessions.CodexKnown {
+			var unknown []string
+			if !item.Sessions.ClaudeKnown {
+				unknown = append(unknown, "Claude")
+			}
+			if !item.Sessions.CodexKnown {
+				unknown = append(unknown, "Codex")
+			}
+			fmt.Fprintf(&output, "  \x1b[33m%s session status unknown\x1b[0m", strings.Join(unknown, "/"))
+		}
 		output.WriteByte('\n')
 	}
 	branches := "keep local branches"
 	if m.deleteBranches {
 		branches = "delete merged local branches (Git safe check)"
 	}
-	if m.selectedSafetyChecking() {
-		fmt.Fprintf(&output, "\n[x] %s\n[b] back  Waiting for safety checks…  [q] quit\n", branches)
-	} else {
-		fmt.Fprintf(&output, "\n[x] %s\n[b] back  [D] delete permanently  [q] quit\n", branches)
-	}
+	fmt.Fprintf(&output, "\n[x] %s\n[b] back  [D] delete permanently  [q] quit\n", branches)
 	return output.String()
 }
 
