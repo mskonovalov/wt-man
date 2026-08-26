@@ -1,0 +1,19 @@
+# Changelog
+
+## 1.0.0 (2026-08-26)
+
+## What's Changed
+* Build a safe interactive worktree manager by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/1
+* Use GitHub PR history for merged worktrees by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/2
+* Move merge checks behind startup by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/4
+* Stream worktree discovery in the background by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/5
+* Recognize GitHub SSH-over-443 remotes by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/6
+* Validate Go builds on Linux and macOS by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/7
+* Add interface demo to README by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/9
+* Recognize earlier commits included in merged PRs by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/8
+* feat: automate GitHub releases by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/10
+
+## New Contributors
+* @mskonovalov made their first contribution in https://github.com/mskonovalov/wt-man/pull/1
+
+**Full Changelog**: https://github.com/mskonovalov/wt-man/commits/v1.0.0
