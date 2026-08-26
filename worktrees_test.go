@@ -143,6 +143,7 @@ func TestDiscoverAndRemoveExistingAndMissingWorktrees(t *testing.T) {
 	repoPath := filepath.Join(root, "repo")
 	existingPath := filepath.Join(root, "existing")
 	missingPath := filepath.Join(root, "missing")
+	brokenPath := filepath.Join(root, "broken")
 	if err := os.Mkdir(repoPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -164,12 +165,25 @@ func TestDiscoverAndRemoveExistingAndMissingWorktrees(t *testing.T) {
 	if err := os.RemoveAll(missingPath); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := git(ctx, repoPath, "worktree", "add", "-b", "broken", brokenPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(brokenPath, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	leftoverPath := filepath.Join(brokenPath, "node_modules", "generated.txt")
+	if err := os.MkdirAll(filepath.Dir(leftoverPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(leftoverPath, []byte("leftover"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	repositories, err := discover(ctx, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(repositories) != 1 || len(repositories[0].Worktrees) != 2 {
+	if len(repositories) != 1 || len(repositories[0].Worktrees) != 3 {
 		t.Fatalf("unexpected discovery result: %#v", repositories)
 	}
 	if repositories[0].MergeTarget != "" || repositories[0].Worktrees[0].MergeKnown {
@@ -187,22 +201,31 @@ func TestDiscoverAndRemoveExistingAndMissingWorktrees(t *testing.T) {
 		if item.Path == missingPath && !item.Missing {
 			t.Fatal("missing worktree was not marked missing")
 		}
-		if !item.MergeKnown || item.Merged != (item.Branch == "missing") {
+		if item.Path == brokenPath && (!item.Broken || item.Missing) {
+			t.Fatalf("broken worktree was not identified: %#v", item)
+		}
+		if !item.MergeKnown || item.Merged != (item.Branch != "existing") {
 			t.Fatalf("unexpected merged status: %#v", item)
 		}
 		result := removeWorktree(ctx, repositories[0], item, false)
 		if result.Err != nil {
 			t.Fatal(result.Err)
 		}
+		if item.Broken && !result.Broken {
+			t.Fatalf("broken deletion was not reported: %#v", result)
+		}
 	}
 	if _, err := os.Stat(existingPath); !os.IsNotExist(err) {
 		t.Fatalf("existing worktree directory still exists: %v", err)
+	}
+	if _, err := os.Stat(brokenPath); !os.IsNotExist(err) {
+		t.Fatalf("broken worktree directory still exists: %v", err)
 	}
 	output, err := git(ctx, repoPath, "worktree", "list", "--porcelain")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(output, existingPath) || strings.Contains(output, missingPath) {
+	if strings.Contains(output, existingPath) || strings.Contains(output, missingPath) || strings.Contains(output, brokenPath) {
 		t.Fatalf("worktree records still exist: %s", output)
 	}
 }
@@ -583,6 +606,27 @@ func TestModelShowsMissingWorktreeExplicitly(t *testing.T) {
 	view := m.browseView()
 	if !strings.Contains(view, "missing") || !strings.Contains(view, "missing (Git record only); prunable") {
 		t.Fatalf("missing worktree state was not rendered: %q", view)
+	}
+}
+
+func TestModelShowsBrokenWorktreeExplicitly(t *testing.T) {
+	m := newModel([]repository{{
+		Name: "example",
+		Worktrees: []worktree{{
+			Path:     "/tmp/broken",
+			Broken:   true,
+			Prunable: true,
+		}},
+	}})
+	m.selected["/tmp/broken"] = true
+
+	view := m.browseView()
+	if !strings.Contains(view, "State: broken (Git metadata missing; leftover files remain)") {
+		t.Fatalf("broken worktree state was not rendered: %q", view)
+	}
+	m.screen = reviewScreen
+	if view := m.reviewView(); !strings.Contains(view, "broken: delete leftover files and Git record") {
+		t.Fatalf("broken worktree deletion was not explained: %q", view)
 	}
 }
 

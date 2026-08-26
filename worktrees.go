@@ -52,6 +52,7 @@ type worktree struct {
 	Prunable    bool
 	Bare        bool
 	Missing     bool
+	Broken      bool
 	Merged      bool
 	Closed      bool
 	MergeKnown  bool
@@ -169,6 +170,7 @@ func discoverRepository(ctx context.Context, gitRoot string, gitRoots []string) 
 		}
 		_, statErr := os.Stat(item.Path)
 		item.Missing = errors.Is(statErr, fs.ErrNotExist)
+		item.Broken = item.Prunable && !item.Missing
 		item.CreatedAt = creationTime(item.Path)
 		linked = append(linked, item)
 	}
@@ -675,12 +677,22 @@ func sessionTime(milliseconds int64) time.Time {
 }
 
 func removeWorktree(ctx context.Context, repo repository, item worktree, deleteBranch bool) deletionResult {
-	result := deletionResult{Path: item.Path, Branch: item.Branch, Missing: item.Missing}
+	result := deletionResult{Path: item.Path, Branch: item.Branch, Missing: item.Missing, Broken: item.Broken}
 	if item.Locked {
 		result.Err = fmt.Errorf("worktree is locked; unlock it before deletion")
 		return result
 	}
+	if item.Broken {
+		if err := os.RemoveAll(item.Path); err != nil {
+			result.Err = fmt.Errorf("remove broken worktree files: %w", err)
+			return result
+		}
+	}
 	if _, err := git(ctx, repo.MainPath, "worktree", "remove", "--force", item.Path); err != nil {
+		if item.Broken {
+			result.Err = fmt.Errorf("broken worktree files removed; remove Git record: %w", err)
+			return result
+		}
 		result.Err = err
 		return result
 	}
