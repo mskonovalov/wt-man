@@ -68,7 +68,7 @@ On macOS, the created column uses the worktree directory's filesystem birth time
 Date scans process one worktree at a time and show progress above the list. Deletion pauses further scans, removes one selected worktree at a time, and shows the current path and batch progress.
 Repository and branch columns expand to show their full values. The path column uses the remaining terminal width and is hidden when space is limited; on narrower terminals, the full branch moves onto a second line. The selected worktree's full details remain below the list.
 
-The PR column shows the matching GitHub pull request as `open`, `merged`, `closed`, or `n/a`. A closed PR must match the worktree branch, base branch, and exact head commit. Open and merged PRs use GitHub's commit association, including squash merges, deleted remote branches, and earlier commits contained in a later PR head.
+The PR column shows the matching GitHub pull request as `open`, `merged`, `closed`, or `n/a`, and the selected worktree details include the matching PR title. A closed PR must match the worktree branch, base branch, and exact head commit. Open and merged PRs use GitHub's commit association, including squash merges, deleted remote branches, and earlier commits contained in a later PR head.
 The GitHub check runs after repository discovery, with progress shown above the table. Branches display `?` in the PR column until it finishes. The matching base branch prefers `origin/HEAD`, then falls back to `origin/main`, `origin/master`, `main`, or `master`.
 Optional branch cleanup always uses Git's safe `git branch -d` check, so closed or otherwise unmerged branches are preserved. Detached worktrees are removed only when their HEAD is reachable from another branch, remote, or tag.
 
