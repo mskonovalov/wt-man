@@ -2,7 +2,7 @@
 
 wt-man is an interactive manager for Git worktrees spread across many repositories.
 
-It scans ~/work by default and groups linked worktrees by repository. On macOS, each group is ordered by filesystem creation time; on other platforms, it retains Git's worktree-list order because a reliable creation time may be unavailable. The terminal UI supports filtering, multi-selection, unarchived Claude/Codex session warnings, bulk removal, and optional local branch deletion.
+It scans ~/work by default and groups linked worktrees by repository. On macOS, each group is ordered by filesystem creation time; on other platforms, it retains Git's worktree-list order because a reliable creation time may be unavailable. The terminal UI combines Git state, local changes, and Claude/Codex sessions into a single conservative safety verdict for each worktree.
 
 ## Install
 
@@ -30,8 +30,7 @@ Keys:
 - Space: select
 - a: select or clear all visible worktrees
 - /: filter by repository, branch, or path
-- u: cycle between all, with unarchived sessions, and without unarchived sessions
-- m: cycle between all, merged, not merged, and unknown merge status
+- s: cycle between all, safe, not safe, and still checking
 - r: refresh the selected worktree's modified date
 - R: refresh all modified dates
 - Enter: review selected worktrees
@@ -44,11 +43,12 @@ For an existing worktree, deletion removes both its directory and Git's worktree
 Optional branch cleanup uses Git's safe `git branch -d` check, so an unmerged local branch is kept even after its worktree has been removed.
 
 On macOS, the created column uses the worktree directory's filesystem birth time. It displays `unknown` on platforms where a reliable creation timestamp is unavailable. The modified column is the newest filesystem modification time anywhere under the worktree; it is scanned in the background and does not follow symbolic links. Results are cached for 24 hours in the operating system's user cache directory.
-Date scans process one worktree at a time and show progress above the list. Deletion pauses further scans, removes one selected worktree at a time, and shows the current path and batch progress.
+Date scans and local-change checks process one worktree at a time and show progress only while active. Deletion waits for selected worktrees to finish their safety checks, pauses an active date scan, removes one selected worktree at a time, and shows the current path and batch progress.
 Repository and branch columns expand to show their full values. The path column uses the remaining terminal width and is hidden when space is limited; on narrower terminals, the full branch moves onto a second line. The selected worktree's full details remain below the list.
 
-The merged column checks whether the local branch tip is already contained in the repository's locally available default branch ref. It prefers `origin/HEAD`, then falls back to `origin/main`, `origin/master`, `main`, or `master`; run `git fetch` first when you need current remote state. A merged branch can still have uncommitted worktree changes, so this is evidence about committed history rather than a complete safety guarantee.
-Local merge checks run one repository at a time after the list appears, followed by the GitHub check, with progress shown above the table. Branches display `?` until their local check finishes.
+`SAFE` requires all of the following: Git reports no tracked, staged, or untracked non-ignored changes; both Claude and Codex session checks succeed and find no unarchived sessions; committed work is contained in the locally available default branch or belongs to an exactly matched merged GitHub pull request; and the worktree is not locked. A failed or unavailable check is conservatively `NOT SAFE`. While required background checks are incomplete, the verdict is `…`.
+
+The committed-work check prefers `origin/HEAD`, then falls back to `origin/main`, `origin/master`, `main`, or `master`; run `git fetch` first when you need current remote state. Local checks run one repository at a time after the list appears, followed by the GitHub check.
 When a GitHub token is available through `GH_TOKEN`, `GITHUB_TOKEN`, or the authenticated `gh` credential store, one bounded GitHub GraphQL request checks the discovered branch-tip commits for merged pull requests, including squash merges and deleted remote branches. The request uses GitHub's Go API client rather than invoking `gh api`. A GitHub result overrides local `no` only when the PR's stored head branch, head SHA, and base branch all match; otherwise the local Git result is retained.
 
-Claude session status is read from Claude Desktop's local session JSON files. Codex status is read from its local SQLite state database when sqlite3 is available. These are internal formats, so session detection is best-effort. `C?` or `X?` means that provider could not be checked; the "without unarchived" filter only shows a worktree when both providers were checked successfully.
+Claude session status is read from Claude Desktop's local session JSON files. Codex status is read from its local SQLite state database when sqlite3 is available. These are internal formats, so session detection is best-effort. If either provider cannot be checked, the worktree is conservatively marked `NOT SAFE`.

@@ -12,6 +12,19 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
+func safeWorktree(path string) worktree {
+	return worktree{
+		Path:           path,
+		Branch:         "feature/safe",
+		MergeChecked:   true,
+		MergeKnown:     true,
+		Merged:         true,
+		ChangesChecked: true,
+		ChangesKnown:   true,
+		Sessions:       sessionCounts{ClaudeKnown: true, CodexKnown: true},
+	}
+}
+
 func TestParseWorktrees(t *testing.T) {
 	output := "worktree /tmp/repo\n" +
 		"HEAD abc123\n" +
@@ -338,6 +351,55 @@ func TestModificationTimeFindsNewestFilesystemEntry(t *testing.T) {
 	}
 }
 
+func TestWorktreeChangesIncludesUntrackedFiles(t *testing.T) {
+	ctx := context.Background()
+	repoPath := t.TempDir()
+	if _, err := git(ctx, repoPath, "init", "-b", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "-c", "user.name=wt-man", "-c", "user.email=wt-man@example.com", "commit", "--allow-empty", "-m", "initial"); err != nil {
+		t.Fatal(err)
+	}
+	if changed, known := worktreeChanges(ctx, repoPath); !known || changed {
+		t.Fatalf("clean worktree returned changed=%v known=%v", changed, known)
+	}
+	if err := os.WriteFile(filepath.Join(repoPath, "untracked.txt"), []byte("local work"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if changed, known := worktreeChanges(ctx, repoPath); !known || !changed {
+		t.Fatalf("untracked file returned changed=%v known=%v", changed, known)
+	}
+}
+
+func TestWorktreeChangesIgnoresIgnoredFiles(t *testing.T) {
+	ctx := context.Background()
+	repoPath := t.TempDir()
+	if _, err := git(ctx, repoPath, "init", "-b", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoPath, ".gitignore"), []byte("ignored.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "add", ".gitignore"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "-c", "user.name=wt-man", "-c", "user.email=wt-man@example.com", "commit", "-m", "initial"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoPath, "ignored.txt"), []byte("generated"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if changed, known := worktreeChanges(ctx, repoPath); !known || changed {
+		t.Fatalf("ignored file returned changed=%v known=%v", changed, known)
+	}
+}
+
+func TestWorktreeChangesReportsUnknownForBrokenWorktree(t *testing.T) {
+	if changed, known := worktreeChanges(context.Background(), t.TempDir()); known || changed {
+		t.Fatalf("non-repository returned changed=%v known=%v", changed, known)
+	}
+}
+
 func TestModelFiltersAndSelectsVisibleRows(t *testing.T) {
 	repositories := []repository{{
 		Name: "example",
@@ -358,27 +420,31 @@ func TestModelFiltersAndSelectsVisibleRows(t *testing.T) {
 	}
 }
 
-func TestModelFiltersByMergeStatus(t *testing.T) {
+func TestModelFiltersBySafety(t *testing.T) {
+	safe := safeWorktree("/tmp/safe")
+	notSafe := safeWorktree("/tmp/not-safe")
+	notSafe.HasChanges = true
 	m := newModel([]repository{{
 		Name: "example",
 		Worktrees: []worktree{
-			{Path: "/tmp/merged", MergeKnown: true, Merged: true},
-			{Path: "/tmp/not-merged", MergeKnown: true},
-			{Path: "/tmp/unknown"},
+			safe,
+			notSafe,
+			{Path: "/tmp/checking"},
 		},
 	}})
-	want := []string{"/tmp/merged", "/tmp/not-merged", "/tmp/unknown"}
+	m.githubAuthChecked = true
+	want := []string{"/tmp/safe", "/tmp/not-safe", "/tmp/checking"}
 	for index, path := range want {
-		updated, _ := m.updateKey("m")
+		updated, _ := m.updateKey("s")
 		m = updated.(model)
 		if len(m.visible) != 1 || m.item(m.visible[0]).Path != path {
 			t.Fatalf("cycle %d returned %#v, want %s", index+1, m.visible, path)
 		}
 	}
-	updated, _ := m.updateKey("m")
+	updated, _ := m.updateKey("s")
 	m = updated.(model)
 	if len(m.visible) != 3 {
-		t.Fatalf("all merge statuses returned %d rows, want 3", len(m.visible))
+		t.Fatalf("all safety statuses returned %d rows, want 3", len(m.visible))
 	}
 }
 
@@ -427,20 +493,17 @@ func TestModelUsesFullBranchWidthBeforePath(t *testing.T) {
 
 func TestModelShowsMergeTargetAndStatus(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	item := safeWorktree("/tmp/merged")
+	item.Branch = "feature/merged"
 	m := newModel([]repository{{
 		Name:        "example",
 		MergeTarget: "origin/main",
-		Worktrees: []worktree{{
-			Path:       "/tmp/merged",
-			Branch:     "feature/merged",
-			MergeKnown: true,
-			Merged:     true,
-		}},
+		Worktrees:   []worktree{item},
 	}})
 
 	view := m.browseView()
-	if !strings.Contains(view, "MERGED") || !strings.Contains(view, "Merged into origin/main: yes") {
-		t.Fatalf("merge status was not rendered: %q", view)
+	if !strings.Contains(view, "SAFE") || !strings.Contains(view, "Safety: SAFE") || !strings.Contains(view, "Merged into origin/main: yes") {
+		t.Fatalf("aggregate safety was not rendered: %q", view)
 	}
 }
 
@@ -461,22 +524,24 @@ func TestGitHubMergeStatusUpdatesRows(t *testing.T) {
 	})
 	m = updated.(model)
 	item := m.item(m.rows[0])
-	if m.githubMergePending || !m.githubAuthChecked || !m.githubAuthAvailable || !item.Merged || item.MergeSource != "GitHub" {
+	if m.githubMergePending || !m.githubAuthChecked || !m.githubAuthAvailable || !item.MergeChecked || !item.Merged || item.MergeSource != "GitHub" {
 		t.Fatalf("GitHub merge status was not applied: %#v, model=%#v", item, m)
 	}
 }
 
-func TestModelWarnsWhenGitHubAuthenticationIsUnavailable(t *testing.T) {
+func TestModelTreatsUnavailableMergeEvidenceAsNotSafe(t *testing.T) {
+	item := safeWorktree("/tmp/example")
+	item.Merged = false
 	m := newModel([]repository{{
 		Name:      "example",
-		Worktrees: []worktree{{Path: "/tmp/example"}},
+		Worktrees: []worktree{item},
 	}})
 	m.githubMergePending = false
 	m.githubAuthChecked = true
 	m.githubAuthAvailable = false
 
-	if view := m.browseView(); !strings.Contains(view, "Warning: GitHub authentication unavailable") {
-		t.Fatalf("GitHub authentication warning was not rendered: %q", view)
+	if view := m.browseView(); !strings.Contains(view, "Safety: NO") || !strings.Contains(view, "committed work is not in the default branch") {
+		t.Fatalf("missing merge evidence was not treated as unsafe: %q", view)
 	}
 }
 
@@ -582,12 +647,11 @@ func TestEnterAfterDeletionReturnsToUpdatedList(t *testing.T) {
 
 func TestDeletionWaitsForScanAndReportsEachWorktree(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	one := safeWorktree("/tmp/one")
+	two := safeWorktree("/tmp/two")
 	m := newModel([]repository{{
-		Name: "example",
-		Worktrees: []worktree{
-			{Path: "/tmp/one"},
-			{Path: "/tmp/two"},
-		},
+		Name:      "example",
+		Worktrees: []worktree{one, two},
 	}})
 	m.selected["/tmp/one"] = true
 	m.selected["/tmp/two"] = true
@@ -619,32 +683,31 @@ func TestDeletionWaitsForScanAndReportsEachWorktree(t *testing.T) {
 	}
 }
 
-func TestModelFiltersByUnarchivedSessions(t *testing.T) {
-	m := newModel([]repository{{
-		Name: "example",
-		Worktrees: []worktree{
-			{Path: "/tmp/open", Sessions: sessionCounts{Claude: 1, ClaudeKnown: true, CodexKnown: true}},
-			{Path: "/tmp/archived", Sessions: sessionCounts{ClaudeKnown: true, CodexKnown: true}},
-			{Path: "/tmp/unknown"},
-		},
-	}})
+func TestDeletionWaitsForSafetyChecks(t *testing.T) {
+	m := newModel([]repository{{Name: "example", Worktrees: []worktree{{Path: "/tmp/checking"}}}})
+	m.selected["/tmp/checking"] = true
+	m.screen = reviewScreen
 
-	updated, _ := m.updateKey("u")
+	updated, command := m.updateKey("D")
 	m = updated.(model)
-	if len(m.visible) != 1 || m.item(m.visible[0]).Path != "/tmp/open" {
-		t.Fatalf("unexpected with-unarchived results: %#v", m.visible)
+	if command != nil || m.screen != reviewScreen || !strings.Contains(m.reviewView(), "Waiting for safety checks") {
+		t.Fatal("deletion did not wait for safety checks")
 	}
+}
 
-	updated, _ = m.updateKey("u")
-	m = updated.(model)
-	if len(m.visible) != 1 || m.item(m.visible[0]).Path != "/tmp/archived" {
-		t.Fatalf("unexpected without-unarchived results: %#v", m.visible)
-	}
+func TestSafetyRejectsSessionsAndUnknownProviders(t *testing.T) {
+	active := safeWorktree("/tmp/active")
+	active.Sessions.Claude = 1
+	unknown := safeWorktree("/tmp/unknown")
+	unknown.Sessions.CodexKnown = false
+	m := newModel([]repository{{Name: "example", Worktrees: []worktree{active, unknown}}})
+	m.githubAuthChecked = true
 
-	updated, _ = m.updateKey("u")
-	m = updated.(model)
-	if len(m.visible) != 3 {
-		t.Fatalf("got %d results after cycling to all", len(m.visible))
+	for _, current := range m.rows {
+		state, reasons := m.safety(current)
+		if state != safetyNotSafe || len(reasons) == 0 {
+			t.Fatalf("session risk was not unsafe: %s state=%v reasons=%v", m.item(current).Path, state, reasons)
+		}
 	}
 }
 
@@ -708,7 +771,9 @@ func TestAssignSessionsUsesDeepestContainingWorktree(t *testing.T) {
 }
 
 func TestLockedWorktreeIsRefusedAndExplained(t *testing.T) {
-	item := worktree{Path: "/tmp/locked", Locked: true, LockReason: "in use"}
+	item := safeWorktree("/tmp/locked")
+	item.Locked = true
+	item.LockReason = "in use"
 	result := removeWorktree(context.Background(), repository{MainPath: "/does/not/matter"}, item, false)
 	if result.Err == nil || result.Removed || !strings.Contains(result.Err.Error(), "locked") {
 		t.Fatalf("unexpected locked deletion result: %#v", result)
@@ -717,18 +782,20 @@ func TestLockedWorktreeIsRefusedAndExplained(t *testing.T) {
 	m.selected[item.Path] = true
 	m.screen = reviewScreen
 	view := m.reviewView()
-	if !strings.Contains(view, "LOCKED: will not delete (in use)") || strings.Contains(view, "delete files and Git record") {
+	if !strings.Contains(view, "NOT SAFE: worktree is locked") || !strings.Contains(view, "will not delete (in use)") || strings.Contains(view, "delete files and Git record") {
 		t.Fatalf("locked state was not explained: %q", view)
 	}
 }
 
-func TestReviewDoesNotRenderUnknownProviderAsZero(t *testing.T) {
-	item := worktree{Path: "/tmp/session", Sessions: sessionCounts{Claude: 2, ClaudeKnown: true}}
+func TestReviewSummarizesSessionRisk(t *testing.T) {
+	item := safeWorktree("/tmp/session")
+	item.Sessions = sessionCounts{Claude: 2, ClaudeKnown: true}
 	m := newModel([]repository{{Name: "example", Worktrees: []worktree{item}}})
+	m.githubAuthChecked = true
 	m.selected[item.Path] = true
 	view := m.reviewView()
-	if !strings.Contains(view, "Claude 2 unarchived") || !strings.Contains(view, "Codex session status unknown") || strings.Contains(view, "Codex 0") {
-		t.Fatalf("unknown provider was rendered as a zero count: %q", view)
+	if !strings.Contains(view, "NOT SAFE: session status is unknown; has unarchived sessions") || strings.Contains(view, "Claude 2") || strings.Contains(view, "Codex 0") {
+		t.Fatalf("session risk was not summarized: %q", view)
 	}
 }
 

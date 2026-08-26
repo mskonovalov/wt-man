@@ -36,21 +36,25 @@ type modificationCacheEntry struct {
 const modificationCacheTTL = 24 * time.Hour
 
 type worktree struct {
-	Path        string
-	Branch      string
-	Head        string
-	Detached    bool
-	Locked      bool
-	LockReason  string
-	Prunable    bool
-	Bare        bool
-	Missing     bool
-	Merged      bool
-	MergeKnown  bool
-	MergeSource string
-	CreatedAt   time.Time
-	ModifiedAt  time.Time
-	Sessions    sessionCounts
+	Path           string
+	Branch         string
+	Head           string
+	Detached       bool
+	Locked         bool
+	LockReason     string
+	Prunable       bool
+	Bare           bool
+	Missing        bool
+	Merged         bool
+	MergeKnown     bool
+	MergeChecked   bool
+	MergeSource    string
+	ChangesChecked bool
+	ChangesKnown   bool
+	HasChanges     bool
+	CreatedAt      time.Time
+	ModifiedAt     time.Time
+	Sessions       sessionCounts
 }
 
 type repository struct {
@@ -586,6 +590,14 @@ func removeWorktree(ctx context.Context, repo repository, item worktree, deleteB
 		result.BranchDeleted = true
 	}
 	return result
+}
+
+func worktreeChanges(ctx context.Context, path string) (bool, bool) {
+	output, err := git(ctx, path, "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none")
+	if err != nil {
+		return false, false
+	}
+	return output != "", true
 }
 
 func modificationTime(path string) time.Time {
