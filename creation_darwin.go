@@ -15,7 +15,7 @@ func creationTime(path string) time.Time {
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return info.ModTime()
+		return time.Time{}
 	}
 	return time.Unix(stat.Birthtimespec.Sec, stat.Birthtimespec.Nsec)
 }

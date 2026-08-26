@@ -2,19 +2,21 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestParseWorktrees(t *testing.T) {
 	output := "worktree /tmp/repo\n" +
 		"HEAD abc123\n" +
-		"branch refs/heads/main\n\n" +
+		"branch refs/heads/main\n" +
+		"bare\n\n" +
 		"worktree /tmp/repo-feature\n" +
 		"HEAD def456\n" +
 		"branch refs/heads/feature/test\n" +
@@ -31,7 +33,10 @@ func TestParseWorktrees(t *testing.T) {
 	if len(items) != 3 {
 		t.Fatalf("got %d worktrees, want 3", len(items))
 	}
-	if items[1].Head != "def456" || items[1].Branch != "feature/test" || !items[1].Locked {
+	if !items[0].Bare {
+		t.Fatalf("bare worktree marker was not parsed: %#v", items[0])
+	}
+	if items[1].Head != "def456" || items[1].Branch != "feature/test" || !items[1].Locked || items[1].LockReason != "reason" {
 		t.Fatalf("unexpected linked worktree: %#v", items[1])
 	}
 	if !items[2].Detached || !items[2].Prunable {
@@ -113,6 +118,119 @@ func TestDiscoverAndRemoveExistingAndMissingWorktrees(t *testing.T) {
 	}
 	if strings.Contains(output, existingPath) || strings.Contains(output, missingPath) {
 		t.Fatalf("worktree records still exist: %s", output)
+	}
+}
+
+func TestDiscoverUsesBareRepositoryAsPrimaryPath(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	seedPath := filepath.Join(root, "seed")
+	barePath := filepath.Join(root, "example.git")
+	linkedPath := filepath.Join(root, "linked")
+	if err := os.Mkdir(seedPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, seedPath, "init", "-b", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, seedPath, "-c", "user.name=wt-man", "-c", "user.email=wt-man@example.com", "commit", "--allow-empty", "-m", "initial"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, root, "clone", "--bare", seedPath, barePath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, barePath, "worktree", "add", "-b", "linked", linkedPath, "main"); err != nil {
+		t.Fatal(err)
+	}
+
+	repositories, _, err := discover(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	barePath, _ = canonicalPath(barePath)
+	linkedPath, _ = canonicalPath(linkedPath)
+	if len(repositories) != 1 || repositories[0].MainPath != barePath || repositories[0].Name != "example.git" {
+		t.Fatalf("bare repository identity was not preserved: %#v", repositories)
+	}
+	if len(repositories[0].Worktrees) != 1 || repositories[0].Worktrees[0].Path != linkedPath {
+		t.Fatalf("bare repository worktree was not discovered: %#v", repositories)
+	}
+}
+
+func TestDiscoverUsesWorktreePathWithSeparateGitDirectory(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	gitDirectory := filepath.Join(root, "metadata")
+	primaryPath := filepath.Join(root, "primary")
+	linkedPath := filepath.Join(root, "linked")
+	if _, err := git(ctx, root, "init", "-b", "main", "--separate-git-dir", gitDirectory, primaryPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, primaryPath, "-c", "user.name=wt-man", "-c", "user.email=wt-man@example.com", "commit", "--allow-empty", "-m", "initial"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, primaryPath, "worktree", "add", "-b", "linked", linkedPath); err != nil {
+		t.Fatal(err)
+	}
+
+	repositories, _, err := discover(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	primaryPath, _ = canonicalPath(primaryPath)
+	if len(repositories) != 1 || repositories[0].MainPath != primaryPath || repositories[0].Name != "primary" {
+		t.Fatalf("separate Git directory changed repository identity: %#v", repositories)
+	}
+}
+
+func TestRemoveWorktreeKeepsUnmergedBranch(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repoPath := filepath.Join(root, "repo")
+	linkedPath := filepath.Join(root, "linked")
+	if err := os.Mkdir(repoPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "init", "-b", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "-c", "user.name=wt-man", "-c", "user.email=wt-man@example.com", "commit", "--allow-empty", "-m", "initial"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "worktree", "add", "-b", "unmerged", linkedPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, linkedPath, "-c", "user.name=wt-man", "-c", "user.email=wt-man@example.com", "commit", "--allow-empty", "-m", "unmerged"); err != nil {
+		t.Fatal(err)
+	}
+
+	result := removeWorktree(ctx, repository{MainPath: repoPath}, worktree{Path: linkedPath, Branch: "unmerged"}, true)
+	if result.Err == nil || !result.Removed || result.BranchDeleted {
+		t.Fatalf("unexpected safe branch deletion result: %#v", result)
+	}
+	if _, err := git(ctx, repoPath, "show-ref", "--verify", "refs/heads/unmerged"); err != nil {
+		t.Fatalf("unmerged branch was not preserved: %v", err)
+	}
+}
+
+func TestMergedBranchesUsesFullyQualifiedFallbackRefs(t *testing.T) {
+	ctx := context.Background()
+	repoPath := t.TempDir()
+	if _, err := git(ctx, repoPath, "init", "-b", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "-c", "user.name=wt-man", "-c", "user.email=wt-man@example.com", "commit", "--allow-empty", "-m", "initial"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "update-ref", "refs/tags/main", "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/missing"); err != nil {
+		t.Fatal(err)
+	}
+	merged, target := mergedBranches(ctx, repoPath)
+	if target != "main" || !merged["main"] {
+		t.Fatalf("fully qualified fallback was not used: target=%q merged=%#v", target, merged)
 	}
 }
 
@@ -278,8 +396,19 @@ func TestModelShowsMissingWorktreeExplicitly(t *testing.T) {
 	}})
 
 	view := m.browseView()
-	if !strings.Contains(view, "missing") || !strings.Contains(view, "missing (prunable; Git record only)") {
+	if !strings.Contains(view, "missing") || !strings.Contains(view, "missing (Git record only); prunable") {
 		t.Fatalf("missing worktree state was not rendered: %q", view)
+	}
+}
+
+func TestModelDoesNotCallEveryMissingWorktreePrunable(t *testing.T) {
+	m := newModel([]repository{{
+		Name:      "example",
+		Worktrees: []worktree{{Path: "/tmp/missing", Missing: true}},
+	}})
+	view := m.browseView()
+	if !strings.Contains(view, "missing (Git record only)") || strings.Contains(view, "prunable") {
+		t.Fatalf("missing non-prunable worktree state was rendered incorrectly: %q", view)
 	}
 }
 
@@ -395,8 +524,9 @@ func TestModelFiltersByUnarchivedSessions(t *testing.T) {
 	m := newModel([]repository{{
 		Name: "example",
 		Worktrees: []worktree{
-			{Path: "/tmp/open", Sessions: sessionCounts{Claude: 1}},
-			{Path: "/tmp/archived"},
+			{Path: "/tmp/open", Sessions: sessionCounts{Claude: 1, ClaudeKnown: true, CodexKnown: true}},
+			{Path: "/tmp/archived", Sessions: sessionCounts{ClaudeKnown: true, CodexKnown: true}},
+			{Path: "/tmp/unknown"},
 		},
 	}})
 
@@ -414,22 +544,90 @@ func TestModelFiltersByUnarchivedSessions(t *testing.T) {
 
 	updated, _ = m.updateKey("u")
 	m = updated.(model)
-	if len(m.visible) != 2 {
+	if len(m.visible) != 3 {
 		t.Fatalf("got %d results after cycling to all", len(m.visible))
 	}
 }
 
-func TestClaudeSessionJSONFields(t *testing.T) {
-	data := []byte(`{"sessionId":"abc","cwd":"/tmp/example","isArchived":false}`)
-	var session struct {
-		SessionID  string
-		CWD        string
-		IsArchived *bool
-	}
-	if err := json.Unmarshal(data, &session); err != nil {
+func TestReadClaudeSessionsFromFixture(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := filepath.Join(home, "worktree", "nested")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if session.SessionID != "abc" || session.CWD != "/tmp/example" || session.IsArchived == nil || *session.IsArchived {
-		t.Fatalf("unexpected session: %#v", session)
+	base := filepath.Join(home, "Library", "Application Support", "Claude", "claude-code-sessions")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(`{"sessionId":"abc","cwd":"` + cwd + `","isArchived":false}`)
+	if err := os.WriteFile(filepath.Join(base, "local_test.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sessions, known := readClaudeSessions()
+	cwd, _ = canonicalPath(cwd)
+	if !known || len(sessions[cwd]) != 1 || !sessions[cwd]["abc"] {
+		t.Fatalf("unexpected sessions: %#v, known=%v", sessions, known)
+	}
+	if err := os.WriteFile(filepath.Join(base, "local_broken.json"), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, known = readClaudeSessions()
+	if known {
+		t.Fatal("malformed Claude session source was reported as known")
+	}
+}
+
+func TestAssignSessionsUsesDeepestContainingWorktree(t *testing.T) {
+	repositories := []repository{{
+		Name: "example",
+		Worktrees: []worktree{
+			{Path: "/tmp/repo"},
+			{Path: "/tmp/repo/nested"},
+		},
+	}}
+	claude := map[string]map[string]bool{"/tmp/repo/nested/subdirectory": {"session": true}}
+	codex := map[string]int{"/tmp/repo/nested/another": 2}
+	assignSessions(repositories, claude, codex, true, true)
+	if repositories[0].Worktrees[0].Sessions.Claude != 0 || repositories[0].Worktrees[0].Sessions.Codex != 0 {
+		t.Fatalf("outer worktree received nested sessions: %#v", repositories)
+	}
+	got := repositories[0].Worktrees[1].Sessions
+	if got.Claude != 1 || got.Codex != 2 || !got.ClaudeKnown || !got.CodexKnown {
+		t.Fatalf("nested worktree did not receive sessions: %#v", got)
+	}
+}
+
+func TestLockedWorktreeIsRefusedAndExplained(t *testing.T) {
+	item := worktree{Path: "/tmp/locked", Locked: true, LockReason: "in use"}
+	result := removeWorktree(context.Background(), repository{MainPath: "/does/not/matter"}, item, false)
+	if result.Err == nil || result.Removed || !strings.Contains(result.Err.Error(), "locked") {
+		t.Fatalf("unexpected locked deletion result: %#v", result)
+	}
+	m := newModel([]repository{{Name: "example", Worktrees: []worktree{item}}})
+	m.selected[item.Path] = true
+	m.screen = reviewScreen
+	view := m.reviewView()
+	if !strings.Contains(view, "LOCKED: will not delete (in use)") {
+		t.Fatalf("locked state was not explained: %q", view)
+	}
+}
+
+func TestCtrlCDoesNotInterruptActiveDeletion(t *testing.T) {
+	m := newModel(nil)
+	m.screen = deletingScreen
+	updated, command := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if command != nil || updated.(model).screen != deletingScreen {
+		t.Fatal("Ctrl+C interrupted active deletion")
+	}
+}
+
+func TestCompactPageSizeAccountsForWrappedBranches(t *testing.T) {
+	branch := strings.Repeat("very-long-branch/", 12)
+	m := newModel([]repository{{Name: "example", Worktrees: []worktree{{Path: "/tmp/one", Branch: branch}}}})
+	m.width = 40
+	m.height = 24
+	if m.compactRowHeight() < 4 || m.pageSize() > 3 {
+		t.Fatalf("wrapped branch was not reflected in pagination: height=%d page=%d", m.compactRowHeight(), m.pageSize())
 	}
 }
