@@ -2,6 +2,7 @@
 
 [![Latest release](https://img.shields.io/github/v/release/mskonovalov/wt-man)](https://github.com/mskonovalov/wt-man/releases/latest)
 [![CI](https://github.com/mskonovalov/wt-man/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mskonovalov/wt-man/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/mskonovalov/wt-man)](LICENSE)
 
 wt-man is an interactive manager for Git worktrees spread across many repositories.
 
