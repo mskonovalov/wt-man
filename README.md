@@ -54,3 +54,7 @@ Local merge checks run one repository at a time after the list appears, followed
 When a GitHub token is available through `GH_TOKEN`, `GITHUB_TOKEN`, or the authenticated `gh` credential store, one bounded GitHub GraphQL request checks the discovered branch-tip commits for merged pull requests, including squash merges and deleted remote branches. The request uses GitHub's Go API client rather than invoking `gh api`. A GitHub result overrides local `no` only when the PR's stored head branch, head SHA, and base branch all match; otherwise the local Git result is retained.
 
 Claude session status is read from Claude Desktop's local session JSON files. Codex status is read from its local SQLite state database when sqlite3 is available. When the selected worktree has unarchived sessions, its details show up to three recent session titles, models, and last activity times below the table. These are internal formats, so session detection is best-effort. `C?` or `X?` means that provider could not be checked; the "without unarchived" filter only shows a worktree when both providers were checked successfully.
+
+## Releases
+
+Releasable changes on `main` update an automated release pull request. Merging that release pull request creates the semantic version tag and GitHub release, then publishes macOS and Linux archives for amd64 and arm64 with SHA-256 checksums. Commit prefixes determine the version bump: `fix:` for a patch, `feat:` for a minor, and a breaking-change marker for a major release.

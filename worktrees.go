@@ -67,6 +67,12 @@ type repository struct {
 	Worktrees   []worktree
 }
 
+type associatedPullRequest struct {
+	MergedAt    *time.Time `json:"mergedAt"`
+	BaseRefName string     `json:"baseRefName"`
+	HeadRefName string     `json:"headRefName"`
+}
+
 var ignoredDirectories = map[string]bool{
 	".cache": true, ".yarn": true, "node_modules": true, "vendor": true,
 }
@@ -295,7 +301,7 @@ func githubMergedRows(ctx context.Context, repositories []repository) (bool, []r
 			}
 			commitAlias := fmt.Sprintf("c%d", worktreeIndex)
 			current.rows[commitAlias] = row{repository: repositoryIndex, worktree: worktreeIndex}
-			fmt.Fprintf(&commitsQuery, "%s: object(oid:%q) { ... on Commit { associatedPullRequests(first:10) { nodes { mergedAt baseRefName headRefName headRefOid } } } }", commitAlias, item.Head)
+			fmt.Fprintf(&commitsQuery, "%s: object(oid:%q) { ... on Commit { associatedPullRequests(first:10) { nodes { mergedAt baseRefName headRefName } } } }", commitAlias, item.Head)
 		}
 		if len(current.rows) > 0 {
 			fmt.Fprintf(&query, "%s: repository(owner:%q,name:%q) {%s}", repositoryAlias, owner, name, commitsQuery.String())
@@ -325,12 +331,7 @@ func githubMergedRows(ctx context.Context, repositories []repository) (bool, []r
 	for repositoryAlias, repositoryQuery := range queries {
 		var commits map[string]struct {
 			AssociatedPullRequests struct {
-				Nodes []struct {
-					MergedAt    *time.Time `json:"mergedAt"`
-					BaseRefName string     `json:"baseRefName"`
-					HeadRefName string     `json:"headRefName"`
-					HeadRefOID  string     `json:"headRefOid"`
-				} `json:"nodes"`
+				Nodes []associatedPullRequest `json:"nodes"`
 			} `json:"associatedPullRequests"`
 		}
 		if json.Unmarshal(response[repositoryAlias], &commits) != nil {
@@ -340,7 +341,7 @@ func githubMergedRows(ctx context.Context, repositories []repository) (bool, []r
 			item := repositories[current.repository].Worktrees[current.worktree]
 			base := strings.TrimPrefix(repositories[current.repository].MergeTarget, "origin/")
 			for _, pullRequest := range commits[commitAlias].AssociatedPullRequests.Nodes {
-				if pullRequest.MergedAt != nil && pullRequest.BaseRefName == base && pullRequest.HeadRefName == item.Branch && pullRequest.HeadRefOID == item.Head {
+				if mergedPullRequestMatches(pullRequest, item, base) {
 					mergedRows = append(mergedRows, current)
 					break
 				}
@@ -348,6 +349,12 @@ func githubMergedRows(ctx context.Context, repositories []repository) (bool, []r
 		}
 	}
 	return true, mergedRows
+}
+
+func mergedPullRequestMatches(pullRequest associatedPullRequest, item worktree, base string) bool {
+	// The pull requests were queried from item.Head, so the association itself is
+	// evidence that the commit belongs to the PR even when its final head differs.
+	return pullRequest.MergedAt != nil && pullRequest.BaseRefName == base && pullRequest.HeadRefName == item.Branch
 }
 
 func githubRepository(ctx context.Context, directory string) (string, string, bool) {
