@@ -751,6 +751,44 @@ func TestCtrlCDoesNotInterruptActiveDeletion(t *testing.T) {
 	}
 }
 
+func TestDiscoveryAddsRepositoriesBeforeScanCompletes(t *testing.T) {
+	m := newDiscoveringModel("/tmp")
+	updated, command := m.Update(gitRootsMsg{roots: []string{"/tmp/one", "/tmp/two"}})
+	m = updated.(model)
+	if command == nil || m.discoveryTotal != 2 {
+		t.Fatalf("repository scan did not start: %#v", m)
+	}
+
+	repo := repository{Name: "one", Worktrees: []worktree{{Path: "/tmp/one-linked", Branch: "feature"}}}
+	updated, command = m.Update(repositoryDiscoveryMsg{
+		generation: m.generation, commonDirectory: "/tmp/one/.git", repository: repo, found: true,
+	})
+	m = updated.(model)
+	if command == nil || !m.discoveryPending || len(m.visible) != 1 || m.item(m.visible[0]).Path != "/tmp/one-linked" {
+		t.Fatalf("repository was not shown during discovery: %#v", m)
+	}
+}
+
+func TestSessionStatusAppliesToRepositoriesDiscoveredLater(t *testing.T) {
+	m := newDiscoveringModel("/tmp")
+	updated, _ := m.Update(sessionStatusMsg{
+		claude: map[string]map[string]bool{"/tmp/linked": {"session": true}},
+		codex:  map[string]int{}, claudeKnown: true, codexKnown: true,
+	})
+	m = updated.(model)
+	m.discoveryRoots = []string{"/tmp/repo"}
+	m.discoveryAllRoots = append([]string(nil), m.discoveryRoots...)
+
+	repo := repository{Name: "repo", Worktrees: []worktree{{Path: "/tmp/linked"}}}
+	updated, _ = m.Update(repositoryDiscoveryMsg{
+		generation: m.generation, commonDirectory: "/tmp/repo/.git", repository: repo, found: true,
+	})
+	m = updated.(model)
+	if got := m.repositories[0].Worktrees[0].Sessions; got.Claude != 1 || !got.ClaudeKnown || !got.CodexKnown {
+		t.Fatalf("session status was not applied to a later repository: %#v", got)
+	}
+}
+
 func TestCompactPageSizeAccountsForWrappedBranches(t *testing.T) {
 	branch := strings.Repeat("very-long-branch/", 12)
 	m := newModel([]repository{{Name: "example", Worktrees: []worktree{{Path: "/tmp/one", Branch: branch}}}})
