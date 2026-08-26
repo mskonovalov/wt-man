@@ -66,6 +66,34 @@ func TestGitHubRepositoryFromOrigin(t *testing.T) {
 	}
 }
 
+func TestMergedPullRequestMatchesEarlierBranchCommit(t *testing.T) {
+	mergedAt := time.Now()
+	pullRequest := associatedPullRequest{
+		MergedAt:    &mergedAt,
+		BaseRefName: "main",
+		HeadRefName: "misha/dp-5500-event-lib-5-3-0",
+	}
+	item := worktree{
+		Branch: "misha/dp-5500-event-lib-5-3-0",
+		Head:   "earlier-commit-in-associated-pr",
+	}
+	if !mergedPullRequestMatches(pullRequest, item, "main") {
+		t.Fatal("earlier commit associated with the merged PR was not matched")
+	}
+	if mergedPullRequestMatches(pullRequest, item, "release") {
+		t.Fatal("pull request with a different base was matched")
+	}
+	item.Branch = "different-branch"
+	if mergedPullRequestMatches(pullRequest, item, "main") {
+		t.Fatal("pull request with a different head branch was matched")
+	}
+	pullRequest.MergedAt = nil
+	item.Branch = "misha/dp-5500-event-lib-5-3-0"
+	if mergedPullRequestMatches(pullRequest, item, "main") {
+		t.Fatal("unmerged pull request was matched")
+	}
+}
+
 func TestDiscoverAndRemoveExistingAndMissingWorktrees(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
