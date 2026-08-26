@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.1.0 (2026-08-26)
+
+## What's Changed
+* Show branches with closed pull requests by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/13
+* Show session details for the selected worktree by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/12
+* feat: install latest release binary by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/15
+* Handle broken worktrees with leftover files by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/18
+* docs: add project badges and MIT license by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/19
+* Default repository scans to the current directory by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/20
+* Show explicit PR status without containment scans by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/17
+
+
+**Full Changelog**: https://github.com/mskonovalov/wt-man/compare/v1.0.0...v1.1.0
+
 ## 1.0.0 (2026-08-26)
 
 ## What's Changed
