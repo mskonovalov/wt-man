@@ -17,7 +17,7 @@ func main() {
 		*root = flag.Arg(0)
 	}
 
-	repositories, err := discover(context.Background(), *root)
+	repositories, githubAuthenticated, err := discover(context.Background(), *root)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "wt-man:", err)
 		os.Exit(1)
@@ -28,6 +28,7 @@ func main() {
 	}
 
 	m := newModel(repositories)
+	m.githubAuthAvailable = githubAuthenticated
 	program := tea.NewProgram(m)
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "wt-man:", err)
