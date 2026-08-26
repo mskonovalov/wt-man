@@ -30,14 +30,14 @@ const (
 	withoutUnarchivedSessions
 )
 
-type mergeMode int
+type pullRequestMode int
 
 const (
-	allMergeStatuses mergeMode = iota
-	mergedOnly
+	allPullRequestStatuses pullRequestMode = iota
 	closedOnly
-	notMergedOnly
-	unknownMergeStatus
+	mergedOnly
+	openOnly
+	notApplicableOnly
 )
 
 type row struct {
@@ -70,18 +70,10 @@ type modificationTimeMsg struct {
 	modifiedAt time.Time
 }
 
-type mergeStatusMsg struct {
-	generation int
-	repository int
-	merged     map[string]bool
-	target     string
-}
-
-type githubMergeStatusMsg struct {
+type githubPullRequestStatusMsg struct {
 	generation    int
 	authenticated bool
-	merged        []row
-	closed        []row
+	statuses      map[row]pullRequestStatus
 }
 
 type gitRootsMsg struct {
@@ -120,13 +112,10 @@ type model struct {
 	repositoryWidth     int
 	branchWidth         int
 	sessionMode         sessionMode
-	mergeMode           mergeMode
+	pullRequestMode     pullRequestMode
 	modificationQueue   []row
 	modificationTotal   int
 	modificationDone    int
-	mergeQueue          []int
-	mergeTotal          int
-	mergeDone           int
 	githubMergePending  bool
 	githubAuthChecked   bool
 	githubAuthAvailable bool
@@ -170,12 +159,6 @@ func newModel(repositories []repository) model {
 		branchWidth:     utf8.RuneCountInString("BRANCH"),
 	}
 	for repositoryIndex, repo := range repositories {
-		for _, item := range repo.Worktrees {
-			if item.Branch != "" {
-				m.mergeQueue = append(m.mergeQueue, repositoryIndex)
-				break
-			}
-		}
 		if width := utf8.RuneCountInString(repo.Name); width > m.repositoryWidth {
 			m.repositoryWidth = width
 		}
@@ -200,8 +183,7 @@ func newModel(repositories []repository) model {
 		}
 	}
 	m.modificationTotal = len(m.modificationQueue)
-	m.mergeTotal = len(m.mergeQueue)
-	m.githubMergePending = len(m.mergeQueue) == 0
+	m.githubMergePending = true
 	m.visible = append([]row(nil), m.rows...)
 	return m
 }
@@ -215,9 +197,7 @@ func (m model) Init() tea.Cmd {
 		current := m.modificationQueue[0]
 		commands = append(commands, scanModificationTime(m.generation, current, m.item(current).Path))
 	}
-	if len(m.mergeQueue) > 0 {
-		commands = append(commands, scanMergeStatus(m.generation, m.mergeQueue[0], m.repositories[m.mergeQueue[0]].MainPath))
-	} else if m.githubMergePending {
+	if m.githubMergePending {
 		commands = append(commands, m.scanGitHubMergeStatus())
 	}
 	return tea.Batch(commands...)
@@ -298,56 +278,23 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		current := m.modificationQueue[0]
 		return m, scanModificationTime(m.generation, current, m.item(current).Path)
-	case mergeStatusMsg:
-		if message.generation != m.generation {
-			return m, nil
-		}
-		repo := &m.repositories[message.repository]
-		repo.MergeTarget = message.target
-		for worktreeIndex := range repo.Worktrees {
-			item := &repo.Worktrees[worktreeIndex]
-			item.Closed = false
-			if item.Branch != "" && message.target != "" {
-				item.Merged = message.merged[item.Branch]
-				item.MergeKnown = true
-				item.MergeSource = "Git"
-			}
-		}
-		m.mergeQueue = m.mergeQueue[1:]
-		m.mergeDone++
-		if m.mergeMode != allMergeStatuses {
-			m.applyFilter()
-		}
-		if len(m.mergeQueue) > 0 {
-			next := m.mergeQueue[0]
-			return m, scanMergeStatus(m.generation, next, m.repositories[next].MainPath)
-		}
-		m.githubMergePending = true
-		return m, m.scanGitHubMergeStatus()
-	case githubMergeStatusMsg:
+	case githubPullRequestStatusMsg:
 		if message.generation != m.generation {
 			return m, nil
 		}
 		m.githubMergePending = false
 		m.githubAuthChecked = true
 		m.githubAuthAvailable = message.authenticated
-		for _, current := range message.merged {
+		for _, current := range m.rows {
 			item := &m.repositories[current.repository].Worktrees[current.worktree]
-			item.Merged = true
-			item.Closed = false
-			item.MergeKnown = true
-			item.MergeSource = "GitHub"
+			item.PullRequestKnown = true
+			item.PullRequestStatus = pullRequestUnmatched
 		}
-		for _, current := range message.closed {
+		for current, status := range message.statuses {
 			item := &m.repositories[current.repository].Worktrees[current.worktree]
-			if item.Merged {
-				continue
-			}
-			item.Closed = true
-			item.MergeKnown = true
-			item.MergeSource = "GitHub"
+			item.PullRequestStatus = status
 		}
-		if m.mergeMode != allMergeStatuses {
+		if m.pullRequestMode != allPullRequestStatuses {
 			m.applyFilter()
 		}
 		return m, nil
@@ -429,8 +376,8 @@ func (m model) updateKey(key string) (tea.Model, tea.Cmd) {
 	case "u":
 		m.sessionMode = (m.sessionMode + 1) % 3
 		m.applyFilter()
-	case "m":
-		m.mergeMode = (m.mergeMode + 1) % 5
+	case "p":
+		m.pullRequestMode = (m.pullRequestMode + 1) % 5
 		m.applyFilter()
 	case "r":
 		if len(m.visible) > 0 {
@@ -485,12 +432,12 @@ func (m *model) applyFilter() {
 		sessionMatches := m.sessionMode == allSessions ||
 			(m.sessionMode == withUnarchivedSessions && hasUnarchived) ||
 			(m.sessionMode == withoutUnarchivedSessions && absenceKnown && !hasUnarchived)
-		mergeMatches := m.mergeMode == allMergeStatuses ||
-			(m.mergeMode == mergedOnly && item.MergeKnown && item.Merged) ||
-			(m.mergeMode == closedOnly && item.MergeKnown && item.Closed) ||
-			(m.mergeMode == notMergedOnly && item.MergeKnown && !item.Merged && !item.Closed) ||
-			(m.mergeMode == unknownMergeStatus && !item.MergeKnown)
-		if strings.Contains(haystack, query) && sessionMatches && mergeMatches {
+		pullRequestMatches := m.pullRequestMode == allPullRequestStatuses ||
+			(m.pullRequestMode == closedOnly && item.PullRequestKnown && item.PullRequestStatus == pullRequestClosed) ||
+			(m.pullRequestMode == mergedOnly && item.PullRequestKnown && item.PullRequestStatus == pullRequestMerged) ||
+			(m.pullRequestMode == openOnly && item.PullRequestKnown && item.PullRequestStatus == pullRequestOpen) ||
+			(m.pullRequestMode == notApplicableOnly && item.PullRequestKnown && item.PullRequestStatus == pullRequestUnmatched)
+		if strings.Contains(haystack, query) && sessionMatches && pullRequestMatches {
 			m.visible = append(m.visible, current)
 		}
 	}
@@ -556,7 +503,7 @@ func (m model) finishDiscovery() (tea.Model, tea.Cmd) {
 	loaded.filtering = m.filtering
 	loaded.screen = m.screen
 	loaded.sessionMode = m.sessionMode
-	loaded.mergeMode = m.mergeMode
+	loaded.pullRequestMode = m.pullRequestMode
 	loaded.generation = m.generation
 	loaded.root = m.root
 	loaded.sessionsPending = m.sessionsPending
@@ -597,7 +544,7 @@ func (m model) compactRowHeight() int {
 		if branch == "" {
 			branch = "detached"
 		}
-		lineWidth := ansi.StringWidth("      Branch: " + branch + "  Status: " + mergeLabel(item))
+		lineWidth := ansi.StringWidth("      Branch: " + branch + "  PR: " + pullRequestLabel(item))
 		wrapped := (lineWidth + m.width - 1) / m.width
 		if 1+wrapped > height {
 			height = 1 + wrapped
@@ -679,7 +626,7 @@ func (m model) returnToList() (tea.Model, tea.Cmd) {
 	refreshed.height = m.height
 	refreshed.query = m.query
 	refreshed.sessionMode = m.sessionMode
-	refreshed.mergeMode = m.mergeMode
+	refreshed.pullRequestMode = m.pullRequestMode
 	refreshed.generation = m.generation + 1
 	refreshed.applyFilter()
 	return refreshed, refreshed.Init()
@@ -704,8 +651,8 @@ func (m model) View() tea.View {
 
 func (m model) browseView() string {
 	var output strings.Builder
-	fmt.Fprintf(&output, "\n\x1b[1mwt-man\x1b[0m  %d worktrees  %d selected  sessions: %s  status: %s\n",
-		len(m.visible), len(m.selectedRows()), m.sessionMode.label(), m.mergeMode.label())
+	fmt.Fprintf(&output, "\n\x1b[1mwt-man\x1b[0m  %d worktrees  %d selected  sessions: %s  PR: %s\n",
+		len(m.visible), len(m.selectedRows()), m.sessionMode.label(), m.pullRequestMode.label())
 	if progress := m.discoveryProgressView(); progress != "" {
 		output.WriteString(truncate(progress, m.width))
 		output.WriteByte('\n')
@@ -714,14 +661,14 @@ func (m model) browseView() string {
 		output.WriteString(truncate(progress, m.width))
 		output.WriteByte('\n')
 	}
-	output.WriteString(truncate(m.mergeProgressView(), m.width))
+	output.WriteString(truncate(m.statusProgressView(), m.width))
 	output.WriteByte('\n')
 	if m.filtering {
 		fmt.Fprintf(&output, "Filter: %s█\n\n", m.query)
 	} else if m.query != "" {
 		fmt.Fprintf(&output, "Filter: %s  (/ to edit)\n\n", m.query)
 	} else {
-		output.WriteString("/ filter  u sessions  m status  r refresh  R refresh all  space select  a all  enter review  q quit\n\n")
+		output.WriteString("/ filter  u sessions  p PR  r refresh  R refresh all  space select  a all  enter review  q quit\n\n")
 	}
 
 	end := m.offset + m.pageSize()
@@ -733,13 +680,13 @@ func (m model) browseView() string {
 	var header string
 	if compact {
 		header = fmt.Sprintf("      %-*s %-10s %-10s %-8s %s",
-			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "STATUS")
+			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "PR")
 	} else if pathWidth > 0 {
 		header = fmt.Sprintf("      %-*s %-10s %-10s %-8s %-6s %-*s %s",
-			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "STATUS", m.branchWidth, "BRANCH", "PATH")
+			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "PR", m.branchWidth, "BRANCH", "PATH")
 	} else {
 		header = fmt.Sprintf("      %-*s %-10s %-10s %-8s %-6s %s",
-			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "STATUS", "BRANCH")
+			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "PR", "BRANCH")
 	}
 	output.WriteString(truncate(header, m.width))
 	output.WriteByte('\n')
@@ -782,13 +729,13 @@ func (m model) browseView() string {
 			branch = "detached"
 		}
 		sessions := sessionLabel(item.Sessions)
-		merged := mergeLabel(item)
+		pullRequest := pullRequestLabel(item)
 		line := fmt.Sprintf("%s [%s] %-*s %-10s %-10s %-8s %-6s",
-			pointer, checked, m.repositoryWidth, repoName, created, modified, sessions, merged)
+			pointer, checked, m.repositoryWidth, repoName, created, modified, sessions, pullRequest)
 		if compact {
 			output.WriteString(truncate(line, m.width))
 			output.WriteByte('\n')
-			output.WriteString("      Branch: " + branch + "  Status: " + merged)
+			output.WriteString("      Branch: " + branch + "  PR: " + pullRequest)
 		} else {
 			line += fmt.Sprintf(" %-*s", m.branchWidth, branch)
 			if pathWidth > 0 {
@@ -810,7 +757,6 @@ func (m model) browseView() string {
 		}
 	} else {
 		current := m.visible[m.cursor]
-		repo := m.repositories[current.repository]
 		item := m.item(current)
 		output.WriteByte('\n')
 		output.WriteString(truncate("Path: "+item.Path, m.width))
@@ -834,22 +780,7 @@ func (m model) browseView() string {
 				branchDetails += " (" + item.LockReason + ")"
 			}
 		}
-		if item.Closed {
-			branchDetails += "  PR to " + repo.MergeTarget + ": closed"
-			if item.MergeSource != "" {
-				branchDetails += " (" + item.MergeSource + ")"
-			}
-		} else if item.MergeKnown {
-			branchDetails += "  Merged into " + repo.MergeTarget + ": "
-			if item.Merged {
-				branchDetails += "yes"
-			} else {
-				branchDetails += "no"
-			}
-			if item.MergeSource != "" {
-				branchDetails += " (" + item.MergeSource + ")"
-			}
-		}
+		branchDetails += "  PR: " + pullRequestLabel(item)
 		output.WriteString(truncate(branchDetails, m.width))
 		output.WriteByte('\n')
 		output.WriteString(sessionDetailsView(item.Sessions, m.width))
@@ -930,20 +861,20 @@ func cleanSessionText(value string) string {
 	return strings.Join(strings.Fields(ansi.Strip(value)), " ")
 }
 
-func mergeLabel(item worktree) string {
-	if item.Closed {
-		return "closed"
-	}
-	if item.MergeKnown {
-		if item.Merged {
-			return "yes"
-		}
-		return "no"
-	}
-	if item.Branch != "" {
+func pullRequestLabel(item worktree) string {
+	if item.Branch != "" && !item.PullRequestKnown {
 		return "?"
 	}
-	return "n/a"
+	switch item.PullRequestStatus {
+	case pullRequestClosed:
+		return "closed"
+	case pullRequestMerged:
+		return "merged"
+	case pullRequestOpen:
+		return "open"
+	default:
+		return "n/a"
+	}
 }
 
 func (m model) pathColumnWidth() int {
@@ -1010,13 +941,6 @@ func scanSessionStatus() tea.Cmd {
 	}
 }
 
-func scanMergeStatus(generation, repositoryIndex int, path string) tea.Cmd {
-	return func() tea.Msg {
-		merged, target := mergedBranches(context.Background(), path)
-		return mergeStatusMsg{generation: generation, repository: repositoryIndex, merged: merged, target: target}
-	}
-}
-
 func (m model) scanGitHubMergeStatus() tea.Cmd {
 	repositories := make([]repository, len(m.repositories))
 	for repositoryIndex, repo := range m.repositories {
@@ -1025,8 +949,8 @@ func (m model) scanGitHubMergeStatus() tea.Cmd {
 	}
 	generation := m.generation
 	return func() tea.Msg {
-		authenticated, merged, closed := githubPullRequestRows(context.Background(), repositories)
-		return githubMergeStatusMsg{generation: generation, authenticated: authenticated, merged: merged, closed: closed}
+		authenticated, statuses := githubPullRequestRows(context.Background(), repositories)
+		return githubPullRequestStatusMsg{generation: generation, authenticated: authenticated, statuses: statuses}
 	}
 }
 
@@ -1049,22 +973,17 @@ func (m model) discoveryProgressView() string {
 	return fmt.Sprintf("Repository scan %s %d/%d", progressBar(m.discoveryDone, m.discoveryTotal, 20), m.discoveryDone, m.discoveryTotal)
 }
 
-func (m model) mergeProgressView() string {
+func (m model) statusProgressView() string {
 	if m.discoveryPending {
-		return "Merge check: waiting for repository scan"
-	}
-	if len(m.mergeQueue) > 0 {
-		repo := m.repositories[m.mergeQueue[0]]
-		return fmt.Sprintf("Merge check %s %d/%d  %s",
-			progressBar(m.mergeDone, m.mergeTotal, 20), m.mergeDone, m.mergeTotal, repo.Name)
+		return "PR check: waiting for repository scan"
 	}
 	if m.githubMergePending {
-		return "Merge check: querying GitHub"
+		return "PR check: querying GitHub"
 	}
 	if m.githubAuthChecked && !m.githubAuthAvailable {
-		return "Warning: GitHub authentication unavailable; merged status uses local Git only. Set GH_TOKEN or run gh auth login."
+		return "Warning: GitHub authentication unavailable; PR status is n/a. Set GH_TOKEN or run gh auth login."
 	}
-	return "Merge check: complete"
+	return "PR check: complete"
 }
 
 func (mode sessionMode) label() string {
@@ -1078,16 +997,16 @@ func (mode sessionMode) label() string {
 	}
 }
 
-func (mode mergeMode) label() string {
+func (mode pullRequestMode) label() string {
 	switch mode {
-	case mergedOnly:
-		return "merged"
 	case closedOnly:
 		return "closed"
-	case notMergedOnly:
-		return "not merged"
-	case unknownMergeStatus:
-		return "unknown"
+	case mergedOnly:
+		return "merged"
+	case openOnly:
+		return "open"
+	case notApplicableOnly:
+		return "n/a"
 	default:
 		return "all"
 	}

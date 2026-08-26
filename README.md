@@ -52,7 +52,7 @@ Keys:
 - a: select or clear all visible worktrees
 - /: filter by repository, branch, or path
 - u: cycle between all, with unarchived sessions, and without unarchived sessions
-- m: cycle between all, merged, closed, not merged, and unknown status
+- p: cycle between all, closed, merged, open, and n/a PR statuses
 - r: refresh the selected worktree's modified date
 - R: refresh all modified dates
 - Enter: review selected worktrees
@@ -68,9 +68,9 @@ On macOS, the created column uses the worktree directory's filesystem birth time
 Date scans process one worktree at a time and show progress above the list. Deletion pauses further scans, removes one selected worktree at a time, and shows the current path and batch progress.
 Repository and branch columns expand to show their full values. The path column uses the remaining terminal width and is hidden when space is limited; on narrower terminals, the full branch moves onto a second line. The selected worktree's full details remain below the list.
 
-The status column checks whether the local branch tip is already contained in the repository's locally available default branch ref. It prefers `origin/HEAD`, then falls back to `origin/main`, `origin/master`, `main`, or `master`; run `git fetch` first when you need current remote state. A merged branch can still have uncommitted worktree changes, so this is evidence about committed history rather than a complete safety guarantee.
-Local merge checks run one repository at a time after the list appears, followed by the GitHub check, with progress shown above the table. Branches display `?` until their local check finishes.
-When a GitHub token is available through `GH_TOKEN`, `GITHUB_TOKEN`, or the authenticated `gh` credential store, one bounded GitHub GraphQL request checks the discovered branch-tip commits for associated pull requests, including squash merges and deleted remote branches. The request uses GitHub's Go API client rather than invoking `gh api`. A matching merged PR displays `yes`; a matching PR closed without merging displays `closed`. Branches with closed PRs remain unmerged, so optional branch cleanup still preserves them through Git's safe `git branch -d` check.
+The PR column shows the matching GitHub pull request as `open`, `merged`, `closed`, or `n/a`. A closed PR must match the worktree branch, base branch, and exact head commit. Open and merged PRs use GitHub's commit association, including squash merges, deleted remote branches, and earlier commits contained in a later PR head.
+The GitHub check runs after repository discovery, with progress shown above the table. Branches display `?` in the PR column until it finishes. The matching base branch prefers `origin/HEAD`, then falls back to `origin/main`, `origin/master`, `main`, or `master`.
+Optional branch cleanup always uses Git's safe `git branch -d` check, so closed or otherwise unmerged branches are preserved. Detached worktrees are removed only when their HEAD is reachable from another branch, remote, or tag.
 
 Claude session status is read from Claude Desktop's local session JSON files. Codex status is read from its local SQLite state database when sqlite3 is available. When the selected worktree has unarchived sessions, its details show up to three recent session titles, models, and last activity times below the table. These are internal formats, so session detection is best-effort. `C?` or `X?` means that provider could not be checked; the "without unarchived" filter only shows a worktree when both providers were checked successfully.
 
