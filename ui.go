@@ -27,6 +27,15 @@ const (
 	withoutUnarchivedSessions
 )
 
+type mergeMode int
+
+const (
+	allMergeStatuses mergeMode = iota
+	mergedOnly
+	notMergedOnly
+	unknownMergeStatus
+)
+
 type row struct {
 	repository int
 	worktree   int
@@ -68,6 +77,7 @@ type model struct {
 	repositoryWidth     int
 	branchWidth         int
 	sessionMode         sessionMode
+	mergeMode           mergeMode
 	modificationQueue   []row
 	modificationTotal   int
 	modificationDone    int
@@ -232,6 +242,9 @@ func (m model) updateKey(key string) (tea.Model, tea.Cmd) {
 	case "u":
 		m.sessionMode = (m.sessionMode + 1) % 3
 		m.applyFilter()
+	case "m":
+		m.mergeMode = (m.mergeMode + 1) % 4
+		m.applyFilter()
 	case "r":
 		if len(m.visible) > 0 {
 			current := m.visible[m.cursor]
@@ -284,7 +297,11 @@ func (m *model) applyFilter() {
 		sessionMatches := m.sessionMode == allSessions ||
 			(m.sessionMode == withUnarchivedSessions && hasUnarchived) ||
 			(m.sessionMode == withoutUnarchivedSessions && !hasUnarchived)
-		if strings.Contains(haystack, query) && sessionMatches {
+		mergeMatches := m.mergeMode == allMergeStatuses ||
+			(m.mergeMode == mergedOnly && item.MergeKnown && item.Merged) ||
+			(m.mergeMode == notMergedOnly && item.MergeKnown && !item.Merged) ||
+			(m.mergeMode == unknownMergeStatus && !item.MergeKnown)
+		if strings.Contains(haystack, query) && sessionMatches && mergeMatches {
 			m.visible = append(m.visible, current)
 		}
 	}
@@ -409,6 +426,7 @@ func (m model) returnToList() (tea.Model, tea.Cmd) {
 	refreshed.height = m.height
 	refreshed.query = m.query
 	refreshed.sessionMode = m.sessionMode
+	refreshed.mergeMode = m.mergeMode
 	refreshed.githubAuthAvailable = m.githubAuthAvailable
 	refreshed.generation = m.generation + 1
 	refreshed.applyFilter()
@@ -434,8 +452,8 @@ func (m model) View() tea.View {
 
 func (m model) browseView() string {
 	var output strings.Builder
-	fmt.Fprintf(&output, "\n\x1b[1mwt-man\x1b[0m  %d worktrees  %d selected  sessions: %s\n",
-		len(m.visible), len(m.selectedRows()), m.sessionMode.label())
+	fmt.Fprintf(&output, "\n\x1b[1mwt-man\x1b[0m  %d worktrees  %d selected  sessions: %s  merged: %s\n",
+		len(m.visible), len(m.selectedRows()), m.sessionMode.label(), m.mergeMode.label())
 	output.WriteString(truncate(m.modificationProgressView(), m.width))
 	output.WriteByte('\n')
 	if !m.githubAuthAvailable {
@@ -447,7 +465,7 @@ func (m model) browseView() string {
 	} else if m.query != "" {
 		fmt.Fprintf(&output, "Filter: %s  (/ to edit)\n\n", m.query)
 	} else {
-		output.WriteString("/ filter  u sessions  r refresh  R refresh all  space select  a all  enter review  q quit\n\n")
+		output.WriteString("/ filter  u sessions  m merged  r refresh  R refresh all  space select  a all  enter review  q quit\n\n")
 	}
 
 	end := m.offset + m.pageSize()
@@ -601,6 +619,19 @@ func (mode sessionMode) label() string {
 		return "with unarchived"
 	case withoutUnarchivedSessions:
 		return "without unarchived"
+	default:
+		return "all"
+	}
+}
+
+func (mode mergeMode) label() string {
+	switch mode {
+	case mergedOnly:
+		return "merged"
+	case notMergedOnly:
+		return "not merged"
+	case unknownMergeStatus:
+		return "unknown"
 	default:
 		return "all"
 	}

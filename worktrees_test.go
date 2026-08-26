@@ -169,6 +169,30 @@ func TestModelFiltersAndSelectsVisibleRows(t *testing.T) {
 	}
 }
 
+func TestModelFiltersByMergeStatus(t *testing.T) {
+	m := newModel([]repository{{
+		Name: "example",
+		Worktrees: []worktree{
+			{Path: "/tmp/merged", MergeKnown: true, Merged: true},
+			{Path: "/tmp/not-merged", MergeKnown: true},
+			{Path: "/tmp/unknown"},
+		},
+	}})
+	want := []string{"/tmp/merged", "/tmp/not-merged", "/tmp/unknown"}
+	for index, path := range want {
+		updated, _ := m.updateKey("m")
+		m = updated.(model)
+		if len(m.visible) != 1 || m.item(m.visible[0]).Path != path {
+			t.Fatalf("cycle %d returned %#v, want %s", index+1, m.visible, path)
+		}
+	}
+	updated, _ := m.updateKey("m")
+	m = updated.(model)
+	if len(m.visible) != 3 {
+		t.Fatalf("all merge statuses returned %d rows, want 3", len(m.visible))
+	}
+}
+
 func TestModelUsesFullRepositoryNameWidth(t *testing.T) {
 	m := newModel([]repository{
 		{Name: "short", Worktrees: []worktree{{Path: "/tmp/one"}}},

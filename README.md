@@ -30,6 +30,7 @@ Keys:
 - a: select or clear all visible worktrees
 - /: filter by repository, branch, or path
 - u: cycle between all, with unarchived sessions, and without unarchived sessions
+- m: cycle between all, merged, not merged, and unknown merge status
 - r: refresh the selected worktree's modified date
 - R: refresh all modified dates
 - Enter: review selected worktrees
