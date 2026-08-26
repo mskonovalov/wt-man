@@ -1,12 +1,30 @@
 # wt-man
 
+[![Latest release](https://img.shields.io/github/v/release/mskonovalov/wt-man)](https://github.com/mskonovalov/wt-man/releases/latest)
+[![CI](https://github.com/mskonovalov/wt-man/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mskonovalov/wt-man/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/mskonovalov/wt-man)](LICENSE)
+
 wt-man is an interactive manager for Git worktrees spread across many repositories.
 
-It scans ~/work by default and groups linked worktrees by repository. The terminal UI opens immediately and adds repositories as they are discovered. On macOS, each group is ordered by filesystem creation time; on other platforms, it retains Git's worktree-list order because a reliable creation time may be unavailable. The terminal UI supports filtering, multi-selection, unarchived Claude/Codex session warnings, bulk removal, and optional local branch deletion.
+By default, wt-man recursively searches the current directory for Git repositories and groups their linked worktrees by repository. The terminal UI opens immediately and adds repositories as they are discovered. On macOS, each group is ordered by filesystem creation time; on other platforms, it retains Git's worktree-list order because a reliable creation time may be unavailable. The terminal UI supports filtering, multi-selection, unarchived Claude/Codex session warnings, bulk removal, and optional local branch deletion.
 
 ![wt-man interactive interface with fictional repositories](docs/wt-man-demo.gif)
 
 ## Install
+
+Install the latest release binary into `~/.local/bin`:
+
+~~~sh
+curl -fsSL https://raw.githubusercontent.com/mskonovalov/wt-man/main/install.sh | sh
+~~~
+
+The installer detects macOS or Linux and amd64 or arm64, then verifies the downloaded archive against the published SHA-256 checksums. To choose another directory:
+
+~~~sh
+curl -fsSL https://raw.githubusercontent.com/mskonovalov/wt-man/main/install.sh | WT_MAN_INSTALL_DIR=/usr/local/bin sh
+~~~
+
+If Go is installed, you can instead build and install the latest tagged version:
 
 ~~~sh
 go install github.com/mskonovalov/wt-man@latest
@@ -21,6 +39,7 @@ go build .
 ## Usage
 
 ~~~sh
+cd /path/containing/repositories
 wt-man
 wt-man --root /path/to/workspace
 ~~~
@@ -42,7 +61,7 @@ Keys:
 - q: quit
 
 Deletion uses `git worktree remove --force`. Locked worktrees are identified in the list and review screen and are refused until you explicitly unlock them with Git. The review screen always appears before anything is removed.
-For an existing worktree, deletion removes both its directory and Git's worktree record. `missing (Git record only)` means the directory no longer exists but Git still has a stale record; `; prunable` is added when Git reports that state. Deleting either missing state removes only the record.
+For an existing worktree, deletion removes both its directory and Git's worktree record. `missing (Git record only)` means the directory no longer exists but Git still has a stale record; deleting it removes only the record. `broken` means Git reports a prunable record while the directory still exists, usually because its `.git` link disappeared. Deleting a broken worktree explicitly removes the leftover directory before removing its Git record.
 Optional branch cleanup uses Git's safe `git branch -d` check, so an unmerged local branch is kept even after its worktree has been removed.
 
 On macOS, the created column uses the worktree directory's filesystem birth time. It displays `unknown` on platforms where a reliable creation timestamp is unavailable. The modified column is the newest filesystem modification time anywhere under the worktree; it is scanned in the background and does not follow symbolic links. Results are cached for 24 hours in the operating system's user cache directory.

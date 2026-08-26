@@ -54,6 +54,7 @@ type deletionResult struct {
 	Path          string
 	Branch        string
 	Missing       bool
+	Broken        bool
 	Removed       bool
 	BranchDeleted bool
 	Err           error
@@ -171,7 +172,7 @@ func newModel(repositories []repository) model {
 			}
 			current := row{repository: repositoryIndex, worktree: worktreeIndex}
 			m.rows = append(m.rows, current)
-			if !repo.Worktrees[worktreeIndex].Missing {
+			if !repo.Worktrees[worktreeIndex].Missing && !repo.Worktrees[worktreeIndex].Broken {
 				entry := cache[repo.Worktrees[worktreeIndex].Path]
 				if entry.ScannedAt.After(cacheCutoff) {
 					m.repositories[repositoryIndex].Worktrees[worktreeIndex].ModifiedAt = entry.ModifiedAt
@@ -578,7 +579,7 @@ func (m model) queueModificationRefresh(rows []row) (tea.Model, tea.Cmd) {
 	}
 	for _, current := range rows {
 		item := m.item(current)
-		if item.Missing || queued[current] {
+		if item.Missing || item.Broken || queued[current] {
 			continue
 		}
 		m.repositories[current.repository].Worktrees[current.worktree].ModifiedAt = time.Time{}
@@ -708,12 +709,16 @@ func (m model) browseView() string {
 		created := "unknown"
 		if item.Missing {
 			created = "missing"
+		} else if item.Broken {
+			created = "broken"
 		} else if !item.CreatedAt.IsZero() {
 			created = item.CreatedAt.Format("2006-01-02")
 		}
 		modified := "scanning"
 		if item.Missing {
 			modified = "missing"
+		} else if item.Broken {
+			modified = "broken"
 		} else if !item.ModifiedAt.IsZero() {
 			modified = item.ModifiedAt.Format("2006-01-02")
 		} else if len(m.modificationQueue) == 0 {
@@ -766,6 +771,8 @@ func (m model) browseView() string {
 			if item.Prunable {
 				branchDetails += "; prunable"
 			}
+		} else if item.Broken {
+			branchDetails += "  State: broken (Git metadata missing; leftover files remain)"
 		}
 		if item.Locked {
 			branchDetails += "  State: locked"
@@ -1031,6 +1038,8 @@ func (m model) reviewView() string {
 		if !item.Locked {
 			if item.Missing {
 				output.WriteString("  \x1b[33mmissing: delete Git record only\x1b[0m")
+			} else if item.Broken {
+				output.WriteString("  \x1b[33mbroken: delete leftover files and Git record\x1b[0m")
 			} else {
 				output.WriteString("  delete files and Git record")
 			}
@@ -1094,6 +1103,8 @@ func (m model) resultsView() string {
 		fmt.Fprintf(&output, "✓ %s", result.Path)
 		if result.Missing {
 			output.WriteString(" (deleted stale Git record)")
+		} else if result.Broken {
+			output.WriteString(" (deleted broken worktree files and Git record)")
 		} else {
 			output.WriteString(" (deleted files and Git record)")
 		}
