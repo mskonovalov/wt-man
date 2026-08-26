@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -17,17 +16,7 @@ func main() {
 		*root = flag.Arg(0)
 	}
 
-	repositories, err := discover(context.Background(), *root)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "wt-man:", err)
-		os.Exit(1)
-	}
-	if len(repositories) == 0 {
-		fmt.Println("No linked Git worktrees found.")
-		return
-	}
-
-	m := newModel(repositories)
+	m := newDiscoveringModel(*root)
 	program := tea.NewProgram(m)
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "wt-man:", err)

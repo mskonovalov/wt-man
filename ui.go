@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -74,6 +76,25 @@ type githubMergeStatusMsg struct {
 	merged        []row
 }
 
+type gitRootsMsg struct {
+	roots []string
+	err   error
+}
+
+type repositoryDiscoveryMsg struct {
+	generation      int
+	commonDirectory string
+	repository      repository
+	found           bool
+}
+
+type sessionStatusMsg struct {
+	claude      map[string]map[string]bool
+	codex       map[string]int
+	claudeKnown bool
+	codexKnown  bool
+}
+
 type model struct {
 	repositories        []repository
 	rows                []row
@@ -105,6 +126,28 @@ type model struct {
 	deletionTotal       int
 	deletionWaiting     bool
 	generation          int
+	root                string
+	discoveryPending    bool
+	discoveryRoots      []string
+	discoveryAllRoots   []string
+	discoverySeen       map[string]bool
+	discoveryTotal      int
+	discoveryDone       int
+	discoveryErr        error
+	sessionsPending     bool
+	claudeSessions      map[string]map[string]bool
+	codexSessions       map[string]int
+	claudeSessionsKnown bool
+	codexSessionsKnown  bool
+}
+
+func newDiscoveringModel(root string) model {
+	m := newModel(nil)
+	m.root = root
+	m.discoveryPending = true
+	m.discoverySeen = make(map[string]bool)
+	m.sessionsPending = true
+	return m
 }
 
 func newModel(repositories []repository) model {
@@ -156,6 +199,9 @@ func newModel(repositories []repository) model {
 }
 
 func (m model) Init() tea.Cmd {
+	if m.discoveryPending && m.discoveryAllRoots == nil {
+		return tea.Batch(findGitRootsCommand(m.root), scanSessionStatus())
+	}
 	var commands []tea.Cmd
 	if len(m.modificationQueue) > 0 {
 		current := m.modificationQueue[0]
@@ -171,6 +217,50 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
+	case gitRootsMsg:
+		if message.err != nil {
+			m.discoveryPending = false
+			m.discoveryErr = message.err
+			return m, nil
+		}
+		m.discoveryRoots = append([]string(nil), message.roots...)
+		m.discoveryAllRoots = append([]string(nil), message.roots...)
+		m.discoveryTotal = len(message.roots)
+		if len(m.discoveryRoots) == 0 {
+			m.discoveryPending = false
+			return m, nil
+		}
+		return m, scanRepository(m.generation, m.discoveryRoots[0], m.discoveryAllRoots)
+	case repositoryDiscoveryMsg:
+		if message.generation != m.generation || len(m.discoveryRoots) == 0 {
+			return m, nil
+		}
+		m.discoveryRoots = m.discoveryRoots[1:]
+		m.discoveryDone++
+		if message.found && !m.discoverySeen[message.commonDirectory] {
+			m.discoverySeen[message.commonDirectory] = true
+			if !m.sessionsPending {
+				repositories := []repository{message.repository}
+				assignSessions(repositories, m.claudeSessions, m.codexSessions, m.claudeSessionsKnown, m.codexSessionsKnown)
+				message.repository = repositories[0]
+			}
+			m.appendDiscoveredRepository(message.repository)
+		}
+		if len(m.discoveryRoots) > 0 {
+			return m, scanRepository(m.generation, m.discoveryRoots[0], m.discoveryAllRoots)
+		}
+		return m.finishDiscovery()
+	case sessionStatusMsg:
+		m.sessionsPending = false
+		m.claudeSessions = message.claude
+		m.codexSessions = message.codex
+		m.claudeSessionsKnown = message.claudeKnown
+		m.codexSessionsKnown = message.codexKnown
+		assignSessions(m.repositories, message.claude, message.codex, message.claudeKnown, message.codexKnown)
+		if m.sessionMode != allSessions {
+			m.applyFilter()
+		}
+		return m, nil
 	case tea.WindowSizeMsg:
 		m.width = message.Width
 		m.height = message.Height
@@ -356,7 +446,7 @@ func (m model) updateKey(key string) (tea.Model, tea.Cmd) {
 	case "a":
 		m.toggleAllVisible()
 	case "enter":
-		if len(m.selectedRows()) > 0 {
+		if !m.discoveryPending && len(m.selectedRows()) > 0 {
 			m.screen = reviewScreen
 		}
 	}
@@ -413,6 +503,49 @@ func (m model) selectedRows() []row {
 
 func (m model) item(current row) worktree {
 	return m.repositories[current.repository].Worktrees[current.worktree]
+}
+
+func (m *model) appendDiscoveredRepository(repo repository) {
+	repositoryIndex := len(m.repositories)
+	m.repositories = append(m.repositories, repo)
+	if width := utf8.RuneCountInString(repo.Name); width > m.repositoryWidth {
+		m.repositoryWidth = width
+	}
+	for worktreeIndex, item := range repo.Worktrees {
+		branch := item.Branch
+		if branch == "" {
+			branch = "detached"
+		}
+		if width := utf8.RuneCountInString(branch); width > m.branchWidth {
+			m.branchWidth = width
+		}
+		m.rows = append(m.rows, row{repository: repositoryIndex, worktree: worktreeIndex})
+	}
+	m.applyFilter()
+}
+
+func (m model) finishDiscovery() (tea.Model, tea.Cmd) {
+	sort.Slice(m.repositories, func(i, j int) bool {
+		return m.repositories[i].Name < m.repositories[j].Name
+	})
+	loaded := newModel(m.repositories)
+	loaded.selected = m.selected
+	loaded.width = m.width
+	loaded.height = m.height
+	loaded.query = m.query
+	loaded.filtering = m.filtering
+	loaded.screen = m.screen
+	loaded.sessionMode = m.sessionMode
+	loaded.mergeMode = m.mergeMode
+	loaded.generation = m.generation
+	loaded.root = m.root
+	loaded.sessionsPending = m.sessionsPending
+	loaded.claudeSessions = m.claudeSessions
+	loaded.codexSessions = m.codexSessions
+	loaded.claudeSessionsKnown = m.claudeSessionsKnown
+	loaded.codexSessionsKnown = m.codexSessionsKnown
+	loaded.applyFilter()
+	return loaded, loaded.Init()
 }
 
 func (m model) pageSize() int {
@@ -552,6 +685,10 @@ func (m model) browseView() string {
 	var output strings.Builder
 	fmt.Fprintf(&output, "\n\x1b[1mwt-man\x1b[0m  %d worktrees  %d selected  sessions: %s  merged: %s\n",
 		len(m.visible), len(m.selectedRows()), m.sessionMode.label(), m.mergeMode.label())
+	if progress := m.discoveryProgressView(); progress != "" {
+		output.WriteString(truncate(progress, m.width))
+		output.WriteByte('\n')
+	}
 	if progress := m.modificationProgressView(); progress != "" {
 		output.WriteString(truncate(progress, m.width))
 		output.WriteByte('\n')
@@ -637,7 +774,15 @@ func (m model) browseView() string {
 		output.WriteByte('\n')
 	}
 	if len(m.visible) == 0 {
-		output.WriteString("No matching worktrees.\n")
+		if m.discoveryPending {
+			output.WriteString("Waiting for linked worktrees...\n")
+		} else if m.discoveryErr != nil {
+			fmt.Fprintf(&output, "Repository scan failed: %v\n", m.discoveryErr)
+		} else if len(m.rows) == 0 {
+			output.WriteString("No linked Git worktrees found.\n")
+		} else {
+			output.WriteString("No matching worktrees.\n")
+		}
 	} else {
 		current := m.visible[m.cursor]
 		repo := m.repositories[current.repository]
@@ -731,6 +876,47 @@ func scanModificationTime(generation int, current row, path string) tea.Cmd {
 	}
 }
 
+func findGitRootsCommand(root string) tea.Cmd {
+	return func() tea.Msg {
+		root, err := canonicalPath(root)
+		if err != nil {
+			return gitRootsMsg{err: fmt.Errorf("resolve root: %w", err)}
+		}
+		roots, err := findGitRoots(root)
+		return gitRootsMsg{roots: roots, err: err}
+	}
+}
+
+func scanRepository(generation int, gitRoot string, gitRoots []string) tea.Cmd {
+	return func() tea.Msg {
+		commonDirectory, repo, found := discoverRepository(context.Background(), gitRoot, gitRoots)
+		return repositoryDiscoveryMsg{
+			generation: generation, commonDirectory: commonDirectory, repository: repo, found: found,
+		}
+	}
+}
+
+func scanSessionStatus() tea.Cmd {
+	return func() tea.Msg {
+		var claude map[string]map[string]bool
+		var codex map[string]int
+		var claudeKnown bool
+		var codexKnown bool
+		var wait sync.WaitGroup
+		wait.Add(2)
+		go func() {
+			defer wait.Done()
+			claude, claudeKnown = readClaudeSessions()
+		}()
+		go func() {
+			defer wait.Done()
+			codex, codexKnown = readCodexSessions(context.Background())
+		}()
+		wait.Wait()
+		return sessionStatusMsg{claude: claude, codex: codex, claudeKnown: claudeKnown, codexKnown: codexKnown}
+	}
+}
+
 func scanMergeStatus(generation, repositoryIndex int, path string) tea.Cmd {
 	return func() tea.Msg {
 		merged, target := mergedBranches(context.Background(), path)
@@ -760,7 +946,20 @@ func (m model) modificationProgressView() string {
 		progressBar(m.modificationDone, m.modificationTotal, 20), m.modificationDone, m.modificationTotal, item.Path)
 }
 
+func (m model) discoveryProgressView() string {
+	if !m.discoveryPending {
+		return ""
+	}
+	if m.discoveryTotal == 0 {
+		return "Repository scan: finding Git repositories under " + m.root
+	}
+	return fmt.Sprintf("Repository scan %s %d/%d", progressBar(m.discoveryDone, m.discoveryTotal, 20), m.discoveryDone, m.discoveryTotal)
+}
+
 func (m model) mergeProgressView() string {
+	if m.discoveryPending {
+		return "Merge check: waiting for repository scan"
+	}
 	if len(m.mergeQueue) > 0 {
 		repo := m.repositories[m.mergeQueue[0]]
 		return fmt.Sprintf("Merge check %s %d/%d  %s",

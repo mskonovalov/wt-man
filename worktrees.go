@@ -98,64 +98,71 @@ func discover(ctx context.Context, root string) ([]repository, error) {
 	seen := make(map[string]bool)
 	var repositories []repository
 	for _, gitRoot := range gitRoots {
-		commonDirectory, err := git(ctx, gitRoot, "rev-parse", "--path-format=absolute", "--git-common-dir")
-		if err != nil {
-			continue
-		}
-		commonDirectory, err = canonicalPath(commonDirectory)
-		if err != nil {
+		commonDirectory, repo, ok := discoverRepository(ctx, gitRoot, gitRoots)
+		if !ok {
 			continue
 		}
 		if seen[commonDirectory] {
 			continue
 		}
 		seen[commonDirectory] = true
-
-		output, err := git(ctx, gitRoot, "worktree", "list", "--porcelain")
-		if err != nil {
-			continue
-		}
-		items, err := parseWorktrees(output)
-		if err != nil || len(items) == 0 {
-			continue
-		}
-		primaryPath, err := primaryWorktreePath(ctx, commonDirectory, items, gitRoots)
-		if err != nil {
-			continue
-		}
-		var linked []worktree
-		for index, item := range items {
-			item.Path, _ = canonicalPath(item.Path)
-			if index == 0 {
-				continue
-			}
-			_, statErr := os.Stat(item.Path)
-			item.Missing = errors.Is(statErr, fs.ErrNotExist)
-			item.CreatedAt = creationTime(item.Path)
-			linked = append(linked, item)
-		}
-		if len(linked) == 0 {
-			continue
-		}
-		sort.SliceStable(linked, func(i, j int) bool {
-			left, right := linked[i].CreatedAt, linked[j].CreatedAt
-			if left.IsZero() {
-				return false
-			}
-			if right.IsZero() {
-				return true
-			}
-			return left.Before(right)
-		})
-		repositories = append(repositories, repository{
-			Name: filepath.Base(primaryPath), MainPath: primaryPath, Worktrees: linked,
-		})
+		repositories = append(repositories, repo)
 	}
 	sort.Slice(repositories, func(i, j int) bool {
 		return repositories[i].Name < repositories[j].Name
 	})
 	assignSessions(repositories, claude, codex, claudeKnown, codexKnown)
 	return repositories, nil
+}
+
+func discoverRepository(ctx context.Context, gitRoot string, gitRoots []string) (string, repository, bool) {
+	commonDirectory, err := git(ctx, gitRoot, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", repository{}, false
+	}
+	commonDirectory, err = canonicalPath(commonDirectory)
+	if err != nil {
+		return "", repository{}, false
+	}
+	output, err := git(ctx, gitRoot, "worktree", "list", "--porcelain")
+	if err != nil {
+		return commonDirectory, repository{}, false
+	}
+	items, err := parseWorktrees(output)
+	if err != nil || len(items) == 0 {
+		return commonDirectory, repository{}, false
+	}
+	primaryPath, err := primaryWorktreePath(ctx, commonDirectory, items, gitRoots)
+	if err != nil {
+		return commonDirectory, repository{}, false
+	}
+	var linked []worktree
+	for index, item := range items {
+		item.Path, _ = canonicalPath(item.Path)
+		if index == 0 {
+			continue
+		}
+		_, statErr := os.Stat(item.Path)
+		item.Missing = errors.Is(statErr, fs.ErrNotExist)
+		item.CreatedAt = creationTime(item.Path)
+		linked = append(linked, item)
+	}
+	if len(linked) == 0 {
+		return commonDirectory, repository{}, false
+	}
+	sort.SliceStable(linked, func(i, j int) bool {
+		left, right := linked[i].CreatedAt, linked[j].CreatedAt
+		if left.IsZero() {
+			return false
+		}
+		if right.IsZero() {
+			return true
+		}
+		return left.Before(right)
+	})
+	return commonDirectory, repository{
+		Name: filepath.Base(primaryPath), MainPath: primaryPath, Worktrees: linked,
+	}, true
 }
 
 func primaryWorktreePath(ctx context.Context, commonDirectory string, items []worktree, gitRoots []string) (string, error) {
