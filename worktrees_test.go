@@ -566,6 +566,28 @@ func TestModelUsesFullBranchWidthBeforePath(t *testing.T) {
 	}
 }
 
+func TestBrowseHighlightsEntireCursorRow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := newModel([]repository{{
+		Name: "example",
+		Worktrees: []worktree{
+			{Path: "/tmp/one", Branch: "feature/one"},
+			{Path: "/tmp/two", Branch: "feature/two"},
+		},
+	}})
+	m.width = 160
+	view := m.browseView()
+	if strings.Count(view, "\x1b[1;7m") != 1 || !strings.Contains(view, "\x1b[1;7m› [ ]") {
+		t.Fatalf("cursor row was not highlighted in the wide layout: %q", view)
+	}
+
+	m.width = 40
+	view = m.browseView()
+	if strings.Count(view, "\x1b[1;7m") != 2 || !strings.Contains(view, "\x1b[1;7m      Branch: feature/one") {
+		t.Fatalf("both cursor-row lines were not highlighted in the compact layout: %q", view)
+	}
+}
+
 func TestModelShowsPullRequestStatus(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	m := newModel([]repository{{
