@@ -18,10 +18,11 @@ Install the latest release binary into `~/.local/bin`:
 curl -fsSL https://raw.githubusercontent.com/mskonovalov/wt-man/main/install.sh | sh
 ~~~
 
-The installer detects macOS or Linux and amd64 or arm64, then verifies the downloaded archive against the published SHA-256 checksums. To choose another directory:
+The installer detects macOS or Linux and amd64 or arm64, then verifies the downloaded archive against the published SHA-256 checksums. For a system-wide installation, download the script first and run it with elevated permissions:
 
 ~~~sh
-curl -fsSL https://raw.githubusercontent.com/mskonovalov/wt-man/main/install.sh | WT_MAN_INSTALL_DIR=/usr/local/bin sh
+curl -fsSL https://raw.githubusercontent.com/mskonovalov/wt-man/main/install.sh -o /tmp/wt-man-install.sh
+sudo env WT_MAN_INSTALL_DIR=/usr/local/bin sh /tmp/wt-man-install.sh
 ~~~
 
 If Go is installed, you can instead build and install the latest tagged version:
