@@ -974,6 +974,30 @@ func TestBrowseShowsRecentSessionDetailsBelowSelectedWorktree(t *testing.T) {
 	}
 }
 
+func TestBrowseDetailAreaHasFixedHeight(t *testing.T) {
+	items := []worktree{
+		{Path: "/tmp/no-sessions"},
+		{
+			Path: "/tmp/four-sessions",
+			Sessions: sessionCounts{
+				ClaudeSessions: []sessionDetail{{Title: "One"}, {Title: "Two"}},
+				CodexSessions:  []sessionDetail{{Title: "Three"}, {Title: "Four"}},
+			},
+		},
+	}
+	m := newModel([]repository{{Name: "example", Worktrees: items}})
+	withoutSessionsPageSize := m.pageSize()
+	withoutSessionsHeight := strings.Count(m.browseView(), "\n")
+
+	m.cursor = 1
+	if m.pageSize() != withoutSessionsPageSize {
+		t.Fatalf("page size changed from %d to %d with session details", withoutSessionsPageSize, m.pageSize())
+	}
+	if height := strings.Count(m.browseView(), "\n"); height != withoutSessionsHeight {
+		t.Fatalf("detail area changed view height from %d to %d lines", withoutSessionsHeight, height)
+	}
+}
+
 func TestBrowseHeaderIsBoundedToTerminalWidth(t *testing.T) {
 	m := newModel([]repository{{Name: strings.Repeat("repository", 20), Worktrees: []worktree{{Path: "/tmp/one"}}}})
 	m.width = 40

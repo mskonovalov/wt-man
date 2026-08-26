@@ -22,6 +22,8 @@ const (
 	resultsScreen
 )
 
+const browseSessionDetailsHeight = 5
+
 type sessionMode int
 
 const (
@@ -790,7 +792,9 @@ func (m model) browseView() string {
 		}
 		output.WriteString(truncate(pullRequestDetails, m.width))
 		output.WriteByte('\n')
-		output.WriteString(sessionDetailsView(item.Sessions, m.width))
+		sessionDetails := sessionDetailsView(item.Sessions, m.width)
+		output.WriteString(sessionDetails)
+		output.WriteString(strings.Repeat("\n", browseSessionDetailsHeight-strings.Count(sessionDetails, "\n")))
 	}
 	return output.String()
 }
@@ -815,16 +819,7 @@ func (m model) sessionDetailsHeight() int {
 	if len(m.visible) == 0 {
 		return 0
 	}
-	sessions := m.item(m.visible[m.cursor]).Sessions
-	total := len(sessions.ClaudeSessions) + len(sessions.CodexSessions)
-	if total == 0 {
-		return 0
-	}
-	height := 1 + min(total, 3)
-	if total > 3 {
-		height++
-	}
-	return height
+	return browseSessionDetailsHeight
 }
 
 func sessionDetailsView(sessions sessionCounts, width int) string {
