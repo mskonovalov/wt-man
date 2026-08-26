@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,10 +21,18 @@ import (
 )
 
 type sessionCounts struct {
-	Claude      int
-	Codex       int
-	ClaudeKnown bool
-	CodexKnown  bool
+	Claude         int
+	Codex          int
+	ClaudeKnown    bool
+	CodexKnown     bool
+	ClaudeSessions []sessionDetail
+	CodexSessions  []sessionDetail
+}
+
+type sessionDetail struct {
+	Title     string
+	Model     string
+	UpdatedAt time.Time
 }
 
 type modificationCacheEntry struct {
@@ -89,8 +96,8 @@ func discover(ctx context.Context, root string) ([]repository, error) {
 	}
 
 	var gitRoots []string
-	var claude map[string]map[string]bool
-	var codex map[string]int
+	var claude map[string]map[string]sessionDetail
+	var codex map[string][]sessionDetail
 	var claudeKnown bool
 	var codexKnown bool
 	var rootsErr error
@@ -244,7 +251,7 @@ func mergedBranches(ctx context.Context, directory string) (map[string]bool, str
 	return merged, target.display
 }
 
-func assignSessions(repositories []repository, claude map[string]map[string]bool, codex map[string]int, claudeKnown, codexKnown bool) {
+func assignSessions(repositories []repository, claude map[string]map[string]sessionDetail, codex map[string][]sessionDetail, claudeKnown, codexKnown bool) {
 	for repositoryIndex := range repositories {
 		for worktreeIndex := range repositories[repositoryIndex].Worktrees {
 			repositories[repositoryIndex].Worktrees[worktreeIndex].Sessions.ClaudeKnown = claudeKnown
@@ -253,12 +260,18 @@ func assignSessions(repositories []repository, claude map[string]map[string]bool
 	}
 	for cwd, sessions := range claude {
 		if repositoryIndex, worktreeIndex, ok := containingWorktree(repositories, cwd); ok {
-			repositories[repositoryIndex].Worktrees[worktreeIndex].Sessions.Claude += len(sessions)
+			item := &repositories[repositoryIndex].Worktrees[worktreeIndex]
+			item.Sessions.Claude += len(sessions)
+			for _, session := range sessions {
+				item.Sessions.ClaudeSessions = append(item.Sessions.ClaudeSessions, session)
+			}
 		}
 	}
-	for cwd, count := range codex {
+	for cwd, sessions := range codex {
 		if repositoryIndex, worktreeIndex, ok := containingWorktree(repositories, cwd); ok {
-			repositories[repositoryIndex].Worktrees[worktreeIndex].Sessions.Codex += count
+			item := &repositories[repositoryIndex].Worktrees[worktreeIndex]
+			item.Sessions.Codex += len(sessions)
+			item.Sessions.CodexSessions = append(item.Sessions.CodexSessions, sessions...)
 		}
 	}
 }
@@ -545,8 +558,8 @@ func parseWorktrees(output string) ([]worktree, error) {
 	return items, nil
 }
 
-func readClaudeSessions() (map[string]map[string]bool, bool) {
-	result := make(map[string]map[string]bool)
+func readClaudeSessions() (map[string]map[string]sessionDetail, bool) {
+	result := make(map[string]map[string]sessionDetail)
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return result, false
@@ -565,9 +578,13 @@ func readClaudeSessions() (map[string]map[string]bool, bool) {
 			return nil
 		}
 		var session struct {
-			SessionID  string
-			CWD        string
-			IsArchived *bool
+			SessionID      string
+			CWD            string
+			IsArchived     *bool
+			Title          string
+			Model          string
+			CreatedAt      int64
+			LastActivityAt int64
 		}
 		data, err := os.ReadFile(path)
 		if err != nil || json.Unmarshal(data, &session) != nil {
@@ -591,16 +608,22 @@ func readClaudeSessions() (map[string]map[string]bool, bool) {
 			return nil
 		}
 		if result[cwd] == nil {
-			result[cwd] = make(map[string]bool)
+			result[cwd] = make(map[string]sessionDetail)
 		}
-		result[cwd][session.SessionID] = true
+		updatedAt := session.LastActivityAt
+		if updatedAt == 0 {
+			updatedAt = session.CreatedAt
+		}
+		result[cwd][session.SessionID] = sessionDetail{
+			Title: session.Title, Model: session.Model, UpdatedAt: sessionTime(updatedAt),
+		}
 		return nil
 	})
 	return result, available && err == nil
 }
 
-func readCodexSessions(ctx context.Context) (map[string]int, bool) {
-	result := make(map[string]int)
+func readCodexSessions(ctx context.Context) (map[string][]sessionDetail, bool) {
+	result := make(map[string][]sessionDetail)
 	if _, err := exec.LookPath("sqlite3"); err != nil {
 		return result, false
 	}
@@ -616,35 +639,39 @@ func readCodexSessions(ctx context.Context) (map[string]int, bool) {
 	if _, err := os.Stat(database); err != nil {
 		return result, false
 	}
-	output, err := exec.CommandContext(ctx, "sqlite3", "-separator", "\t", database,
-		"SELECT cwd, COUNT(*) FROM threads WHERE archived = 0 GROUP BY cwd;").Output()
+	output, err := exec.CommandContext(ctx, "sqlite3", "-json", database,
+		"SELECT cwd, title, COALESCE(model, '') AS model, COALESCE(updated_at_ms, updated_at * 1000) AS updated_at_ms FROM threads WHERE archived = 0;").Output()
 	if err != nil {
 		return result, false
 	}
-	available := true
-	trimmed := strings.TrimSpace(string(output))
-	if trimmed == "" {
-		return result, true
+	var sessions []struct {
+		CWD         string `json:"cwd"`
+		Title       string `json:"title"`
+		Model       string `json:"model"`
+		UpdatedAtMS int64  `json:"updated_at_ms"`
 	}
-	for _, line := range strings.Split(trimmed, "\n") {
-		separator := strings.LastIndexByte(line, '\t')
-		if separator == -1 {
-			available = false
-			continue
-		}
-		count, err := strconv.Atoi(line[separator+1:])
-		if err != nil {
-			available = false
-			continue
-		}
-		cwd, err := canonicalPath(line[:separator])
+	if len(output) > 0 && json.Unmarshal(output, &sessions) != nil {
+		return result, false
+	}
+	available := true
+	for _, session := range sessions {
+		cwd, err := canonicalPath(session.CWD)
 		if err == nil {
-			result[cwd] = count
+			result[cwd] = append(result[cwd], sessionDetail{
+				Title: session.Title, Model: session.Model, UpdatedAt: sessionTime(session.UpdatedAtMS),
+			})
 		} else {
 			available = false
 		}
 	}
 	return result, available
+}
+
+func sessionTime(milliseconds int64) time.Time {
+	if milliseconds == 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(milliseconds)
 }
 
 func removeWorktree(ctx context.Context, repo repository, item worktree, deleteBranch bool) deletionResult {

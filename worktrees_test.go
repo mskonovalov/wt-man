@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -748,13 +749,13 @@ func TestReadClaudeSessionsFromFixture(t *testing.T) {
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	data := []byte(`{"sessionId":"abc","cwd":"` + cwd + `","isArchived":false}`)
+	data := []byte(`{"sessionId":"abc","cwd":"` + cwd + `","isArchived":false,"title":"Fix checkout","model":"claude-opus","createdAt":1770000000000,"lastActivityAt":1770000300000}`)
 	if err := os.WriteFile(filepath.Join(base, "local_test.json"), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	sessions, known := readClaudeSessions()
 	cwd, _ = canonicalPath(cwd)
-	if !known || len(sessions[cwd]) != 1 || !sessions[cwd]["abc"] {
+	if detail, ok := sessions[cwd]["abc"]; !known || !ok || detail.Title != "Fix checkout" || detail.Model != "claude-opus" || detail.UpdatedAt.UnixMilli() != 1770000300000 {
 		t.Fatalf("unexpected sessions: %#v, known=%v", sessions, known)
 	}
 	if err := os.WriteFile(filepath.Join(base, "local_broken.json"), []byte("{"), 0o644); err != nil {
@@ -776,6 +777,33 @@ func TestReadClaudeSessionsFromFixture(t *testing.T) {
 	}
 }
 
+func TestReadCodexSessionDetailsFromFixture(t *testing.T) {
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		t.Skip("sqlite3 is unavailable")
+	}
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	cwd := filepath.Join(codexHome, "worktree")
+	if err := os.MkdirAll(filepath.Join(codexHome, "sqlite"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	database := filepath.Join(codexHome, "sqlite", "state_5.sqlite")
+	schema := "CREATE TABLE threads (cwd TEXT, title TEXT, model TEXT, updated_at INTEGER, updated_at_ms INTEGER, archived INTEGER);" +
+		"INSERT INTO threads VALUES ('" + cwd + "', 'Review worktrees', 'gpt-5.6', 1770000000, 1770000300000, 0);" +
+		"INSERT INTO threads VALUES ('" + cwd + "', 'Archived task', 'gpt-5.6', 1770000000, 1770000300000, 1);"
+	if output, err := exec.Command("sqlite3", database, schema).CombinedOutput(); err != nil {
+		t.Fatalf("create Codex fixture: %v: %s", err, output)
+	}
+	sessions, known := readCodexSessions(context.Background())
+	cwd, _ = canonicalPath(cwd)
+	if !known || len(sessions[cwd]) != 1 || sessions[cwd][0].Title != "Review worktrees" || sessions[cwd][0].Model != "gpt-5.6" || sessions[cwd][0].UpdatedAt.UnixMilli() != 1770000300000 {
+		t.Fatalf("unexpected sessions: %#v, known=%v", sessions, known)
+	}
+}
+
 func TestAssignSessionsUsesDeepestContainingWorktree(t *testing.T) {
 	repositories := []repository{{
 		Name: "example",
@@ -784,14 +812,18 @@ func TestAssignSessionsUsesDeepestContainingWorktree(t *testing.T) {
 			{Path: "/tmp/repo/nested"},
 		},
 	}}
-	claude := map[string]map[string]bool{"/tmp/repo/nested/subdirectory": {"session": true}}
-	codex := map[string]int{"/tmp/repo/nested/another": 2}
+	claude := map[string]map[string]sessionDetail{
+		"/tmp/repo/nested/subdirectory": {"session": {Title: "Claude task"}},
+	}
+	codex := map[string][]sessionDetail{
+		"/tmp/repo/nested/another": {{Title: "Codex task"}, {Title: "Another task"}},
+	}
 	assignSessions(repositories, claude, codex, true, true)
 	if repositories[0].Worktrees[0].Sessions.Claude != 0 || repositories[0].Worktrees[0].Sessions.Codex != 0 {
 		t.Fatalf("outer worktree received nested sessions: %#v", repositories)
 	}
 	got := repositories[0].Worktrees[1].Sessions
-	if got.Claude != 1 || got.Codex != 2 || !got.ClaudeKnown || !got.CodexKnown {
+	if got.Claude != 1 || got.Codex != 2 || !got.ClaudeKnown || !got.CodexKnown || got.ClaudeSessions[0].Title != "Claude task" || got.CodexSessions[1].Title != "Another task" {
 		t.Fatalf("nested worktree did not receive sessions: %#v", got)
 	}
 }
@@ -818,6 +850,36 @@ func TestReviewDoesNotRenderUnknownProviderAsZero(t *testing.T) {
 	view := m.reviewView()
 	if !strings.Contains(view, "Claude 2 unarchived") || !strings.Contains(view, "Codex session status unknown") || strings.Contains(view, "Codex 0") {
 		t.Fatalf("unknown provider was rendered as a zero count: %q", view)
+	}
+}
+
+func TestBrowseShowsRecentSessionDetailsBelowSelectedWorktree(t *testing.T) {
+	item := worktree{
+		Path: "/tmp/session-details",
+		Sessions: sessionCounts{
+			Claude: 2, Codex: 2, ClaudeKnown: true, CodexKnown: true,
+			ClaudeSessions: []sessionDetail{
+				{Title: "Old Claude task", UpdatedAt: time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)},
+				{Title: "Newest Claude task", Model: "claude-opus", UpdatedAt: time.Date(2026, 8, 26, 15, 0, 0, 0, time.UTC)},
+			},
+			CodexSessions: []sessionDetail{
+				{Title: "Middle Codex task", Model: "gpt-5.6", UpdatedAt: time.Date(2026, 8, 25, 14, 0, 0, 0, time.UTC)},
+				{Title: "Another Codex task", UpdatedAt: time.Date(2026, 8, 24, 13, 0, 0, 0, time.UTC)},
+			},
+		},
+	}
+	m := newModel([]repository{{Name: "example", Worktrees: []worktree{item}}})
+	m.width = 160
+	view := m.browseView()
+	pathIndex := strings.Index(view, "Path: ")
+	titleIndex := strings.Index(view, `Claude: "Newest Claude task"`)
+	if pathIndex == -1 || titleIndex < pathIndex {
+		t.Fatalf("session details were not rendered below the selected worktree: %q", view)
+	}
+	if !strings.Contains(view, "claude-opus · active 2026-08-26 15:00") ||
+		!strings.Contains(view, `Codex: "Middle Codex task"`) ||
+		!strings.Contains(view, "+1 more") || strings.Contains(view, "Old Claude task") {
+		t.Fatalf("recent session details were rendered incorrectly: %q", view)
 	}
 }
 
@@ -861,8 +923,8 @@ func TestDiscoveryAddsRepositoriesBeforeScanCompletes(t *testing.T) {
 func TestSessionStatusAppliesToRepositoriesDiscoveredLater(t *testing.T) {
 	m := newDiscoveringModel("/tmp")
 	updated, _ := m.Update(sessionStatusMsg{
-		claude: map[string]map[string]bool{"/tmp/linked": {"session": true}},
-		codex:  map[string]int{}, claudeKnown: true, codexKnown: true,
+		claude: map[string]map[string]sessionDetail{"/tmp/linked": {"session": {Title: "Claude task"}}},
+		codex:  map[string][]sessionDetail{}, claudeKnown: true, codexKnown: true,
 	})
 	m = updated.(model)
 	m.discoveryRoots = []string{"/tmp/repo"}
@@ -873,7 +935,7 @@ func TestSessionStatusAppliesToRepositoriesDiscoveredLater(t *testing.T) {
 		generation: m.generation, commonDirectory: "/tmp/repo/.git", repository: repo, found: true,
 	})
 	m = updated.(model)
-	if got := m.repositories[0].Worktrees[0].Sessions; got.Claude != 1 || !got.ClaudeKnown || !got.CodexKnown {
+	if got := m.repositories[0].Worktrees[0].Sessions; got.Claude != 1 || !got.ClaudeKnown || !got.CodexKnown || got.ClaudeSessions[0].Title != "Claude task" {
 		t.Fatalf("session status was not applied to a later repository: %#v", got)
 	}
 }
