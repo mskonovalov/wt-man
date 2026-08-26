@@ -54,6 +54,7 @@ type worktree struct {
 	Missing           bool
 	Broken            bool
 	PullRequestStatus pullRequestStatus
+	PullRequestTitle  string
 	PullRequestKnown  bool
 	CreatedAt         time.Time
 	ModifiedAt        time.Time
@@ -69,9 +70,15 @@ type repository struct {
 type associatedPullRequest struct {
 	MergedAt    *time.Time `json:"mergedAt"`
 	State       string     `json:"state"`
+	Title       string     `json:"title"`
 	BaseRefName string     `json:"baseRefName"`
 	HeadRefName string     `json:"headRefName"`
 	HeadRefOID  string     `json:"headRefOid"`
+}
+
+type pullRequestMatch struct {
+	Status pullRequestStatus
+	Title  string
 }
 
 type pullRequestStatus int
@@ -281,7 +288,7 @@ func containingWorktree(repositories []repository, path string) (int, int, bool)
 	return bestRepository, bestWorktree, bestLength >= 0
 }
 
-func githubPullRequestRows(ctx context.Context, repositories []repository) (bool, map[row]pullRequestStatus) {
+func githubPullRequestRows(ctx context.Context, repositories []repository) (bool, map[row]pullRequestMatch) {
 	type repositoryQuery struct {
 		commitRows map[string]row
 		closedRows map[string]row
@@ -305,11 +312,11 @@ func githubPullRequestRows(ctx context.Context, repositories []repository) (bool
 			}
 			commitAlias := fmt.Sprintf("c%d", worktreeIndex)
 			current.commitRows[commitAlias] = row{repository: repositoryIndex, worktree: worktreeIndex}
-			fmt.Fprintf(&repositoryFields, "%s: object(oid:%q) { ... on Commit { associatedPullRequests(first:10) { nodes { mergedAt state baseRefName headRefName headRefOid } } } }", commitAlias, item.Head)
+			fmt.Fprintf(&repositoryFields, "%s: object(oid:%q) { ... on Commit { associatedPullRequests(first:10) { nodes { mergedAt state title baseRefName headRefName headRefOid } } } }", commitAlias, item.Head)
 			if current.base != "" {
 				closedAlias := fmt.Sprintf("p%d", worktreeIndex)
 				current.closedRows[closedAlias] = row{repository: repositoryIndex, worktree: worktreeIndex}
-				fmt.Fprintf(&repositoryFields, "%s: pullRequests(first:10, states:CLOSED, headRefName:%q, baseRefName:%q) { nodes { mergedAt state baseRefName headRefName headRefOid } }", closedAlias, item.Branch, current.base)
+				fmt.Fprintf(&repositoryFields, "%s: pullRequests(first:10, states:CLOSED, headRefName:%q, baseRefName:%q) { nodes { mergedAt state title baseRefName headRefName headRefOid } }", closedAlias, item.Branch, current.base)
 			}
 		}
 		if len(current.commitRows) > 0 {
@@ -336,7 +343,7 @@ func githubPullRequestRows(ctx context.Context, repositories []repository) (bool
 	if client.DoWithContext(apiContext, query.String(), nil, &response) != nil {
 		return true, nil
 	}
-	statuses := make(map[row]pullRequestStatus)
+	pullRequests := make(map[row]pullRequestMatch)
 	for repositoryAlias, repositoryQuery := range queries {
 		var fields map[string]json.RawMessage
 		if json.Unmarshal(response[repositoryAlias], &fields) != nil {
@@ -353,27 +360,27 @@ func githubPullRequestRows(ctx context.Context, repositories []repository) (bool
 			}
 			item := repositories[current.repository].Worktrees[current.worktree]
 			for _, pullRequest := range commit.AssociatedPullRequests.Nodes {
-				if candidate := matchingPullRequestStatus(pullRequest, item, repositoryQuery.base); candidate > statuses[current] {
-					statuses[current] = candidate
+				if candidate := matchingPullRequestStatus(pullRequest, item, repositoryQuery.base); candidate > pullRequests[current].Status {
+					pullRequests[current] = pullRequestMatch{Status: candidate, Title: pullRequest.Title}
 				}
 			}
 		}
 		for closedAlias, current := range repositoryQuery.closedRows {
-			var pullRequests struct {
+			var closedPullRequests struct {
 				Nodes []associatedPullRequest `json:"nodes"`
 			}
-			if json.Unmarshal(fields[closedAlias], &pullRequests) != nil {
+			if json.Unmarshal(fields[closedAlias], &closedPullRequests) != nil {
 				continue
 			}
 			item := repositories[current.repository].Worktrees[current.worktree]
-			for _, pullRequest := range pullRequests.Nodes {
-				if candidate := matchingClosedPullRequestStatus(pullRequest, item, repositoryQuery.base); candidate > statuses[current] {
-					statuses[current] = candidate
+			for _, pullRequest := range closedPullRequests.Nodes {
+				if candidate := matchingClosedPullRequestStatus(pullRequest, item, repositoryQuery.base); candidate > pullRequests[current].Status {
+					pullRequests[current] = pullRequestMatch{Status: candidate, Title: pullRequest.Title}
 				}
 			}
 		}
 	}
-	return true, statuses
+	return true, pullRequests
 }
 
 func matchingPullRequestStatus(pullRequest associatedPullRequest, item worktree, base string) pullRequestStatus {

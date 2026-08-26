@@ -599,10 +599,10 @@ func TestGitHubMergeStatusUpdatesRows(t *testing.T) {
 	updated, _ := m.Update(githubPullRequestStatusMsg{
 		generation:    m.generation,
 		authenticated: true,
-		statuses: map[row]pullRequestStatus{
-			{repository: 0, worktree: 0}: pullRequestMerged,
-			{repository: 0, worktree: 1}: pullRequestClosed,
-			{repository: 0, worktree: 2}: pullRequestOpen,
+		pullRequests: map[row]pullRequestMatch{
+			{repository: 0, worktree: 0}: {Status: pullRequestMerged, Title: "Merge the feature"},
+			{repository: 0, worktree: 1}: {Status: pullRequestClosed, Title: "Close the experiment"},
+			{repository: 0, worktree: 2}: {Status: pullRequestOpen, Title: "Try the feature"},
 		},
 	})
 	m = updated.(model)
@@ -621,8 +621,8 @@ func TestGitHubMergeStatusUpdatesRows(t *testing.T) {
 	}
 	m.cursor = 1
 	view := m.browseView()
-	if !strings.Contains(view, "closed") || !strings.Contains(view, "PR: closed") {
-		t.Fatalf("closed status was not rendered: %q", view)
+	if !strings.Contains(view, "closed") || !strings.Contains(view, "PR: closed — Close the experiment") {
+		t.Fatalf("closed status and title were not rendered: %q", view)
 	}
 }
 

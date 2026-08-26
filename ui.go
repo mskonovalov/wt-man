@@ -73,7 +73,7 @@ type modificationTimeMsg struct {
 type githubPullRequestStatusMsg struct {
 	generation    int
 	authenticated bool
-	statuses      map[row]pullRequestStatus
+	pullRequests  map[row]pullRequestMatch
 }
 
 type gitRootsMsg struct {
@@ -289,10 +289,12 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			item := &m.repositories[current.repository].Worktrees[current.worktree]
 			item.PullRequestKnown = true
 			item.PullRequestStatus = pullRequestUnmatched
+			item.PullRequestTitle = ""
 		}
-		for current, status := range message.statuses {
+		for current, pullRequest := range message.pullRequests {
 			item := &m.repositories[current.repository].Worktrees[current.worktree]
-			item.PullRequestStatus = status
+			item.PullRequestStatus = pullRequest.Status
+			item.PullRequestTitle = pullRequest.Title
 		}
 		if m.pullRequestMode != allPullRequestStatuses {
 			m.applyFilter()
@@ -519,7 +521,7 @@ func (m model) pageSize() int {
 	if m.height < 13 {
 		return 1
 	}
-	size := m.height - 12
+	size := m.height - 13
 	if len(m.modificationQueue) > 0 {
 		size--
 	}
@@ -780,8 +782,13 @@ func (m model) browseView() string {
 				branchDetails += " (" + item.LockReason + ")"
 			}
 		}
-		branchDetails += "  PR: " + pullRequestLabel(item)
 		output.WriteString(truncate(branchDetails, m.width))
+		output.WriteByte('\n')
+		pullRequestDetails := "PR: " + pullRequestLabel(item)
+		if item.PullRequestTitle != "" {
+			pullRequestDetails += " — " + item.PullRequestTitle
+		}
+		output.WriteString(truncate(pullRequestDetails, m.width))
 		output.WriteByte('\n')
 		output.WriteString(sessionDetailsView(item.Sessions, m.width))
 	}
@@ -949,8 +956,8 @@ func (m model) scanGitHubMergeStatus() tea.Cmd {
 	}
 	generation := m.generation
 	return func() tea.Msg {
-		authenticated, statuses := githubPullRequestRows(context.Background(), repositories)
-		return githubPullRequestStatusMsg{generation: generation, authenticated: authenticated, statuses: statuses}
+		authenticated, pullRequests := githubPullRequestRows(context.Background(), repositories)
+		return githubPullRequestStatusMsg{generation: generation, authenticated: authenticated, pullRequests: pullRequests}
 	}
 }
 
