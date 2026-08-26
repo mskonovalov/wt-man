@@ -52,9 +52,6 @@ type worktree struct {
 	Prunable          bool
 	Bare              bool
 	Missing           bool
-	Merged            bool
-	MergeKnown        bool
-	MergeSource       string
 	PullRequestStatus pullRequestStatus
 	PullRequestKnown  bool
 	CreatedAt         time.Time
@@ -63,10 +60,9 @@ type worktree struct {
 }
 
 type repository struct {
-	Name        string
-	MainPath    string
-	MergeTarget string
-	Worktrees   []worktree
+	Name      string
+	MainPath  string
+	Worktrees []worktree
 }
 
 type associatedPullRequest struct {
@@ -214,7 +210,7 @@ func primaryWorktreePath(ctx context.Context, commonDirectory string, items []wo
 	return "", fmt.Errorf("find primary worktree for %s", commonDirectory)
 }
 
-func mergedBranches(ctx context.Context, directory string) (map[string]bool, string) {
+func defaultBranchTarget(ctx context.Context, directory string) string {
 	type candidate struct {
 		ref     string
 		display string
@@ -236,20 +232,10 @@ func mergedBranches(ctx context.Context, directory string) (map[string]bool, str
 			break
 		}
 	}
-	merged := make(map[string]bool)
 	if target.ref == "" {
-		return merged, ""
+		return ""
 	}
-	output, err := git(ctx, directory, "for-each-ref", "--format=%(refname)", "--merged="+target.ref, "refs/heads")
-	if err != nil {
-		return merged, ""
-	}
-	for _, branch := range strings.Split(output, "\n") {
-		if strings.HasPrefix(branch, "refs/heads/") {
-			merged[strings.TrimPrefix(branch, "refs/heads/")] = true
-		}
-	}
-	return merged, target.display
+	return target.display
 }
 
 func assignSessions(repositories []repository, claude map[string]map[string]sessionDetail, codex map[string][]sessionDetail, claudeKnown, codexKnown bool) {
@@ -297,6 +283,7 @@ func githubPullRequestRows(ctx context.Context, repositories []repository) (bool
 	type repositoryQuery struct {
 		commitRows map[string]row
 		closedRows map[string]row
+		base       string
 	}
 	queries := make(map[string]repositoryQuery)
 	var query strings.Builder
@@ -309,7 +296,7 @@ func githubPullRequestRows(ctx context.Context, repositories []repository) (bool
 		repositoryAlias := fmt.Sprintf("r%d", repositoryIndex)
 		current := repositoryQuery{commitRows: make(map[string]row), closedRows: make(map[string]row)}
 		var repositoryFields strings.Builder
-		base := strings.TrimPrefix(repo.MergeTarget, "origin/")
+		current.base = strings.TrimPrefix(defaultBranchTarget(ctx, repo.MainPath), "origin/")
 		for worktreeIndex, item := range repo.Worktrees {
 			if item.Branch == "" || item.Head == "" {
 				continue
@@ -317,10 +304,10 @@ func githubPullRequestRows(ctx context.Context, repositories []repository) (bool
 			commitAlias := fmt.Sprintf("c%d", worktreeIndex)
 			current.commitRows[commitAlias] = row{repository: repositoryIndex, worktree: worktreeIndex}
 			fmt.Fprintf(&repositoryFields, "%s: object(oid:%q) { ... on Commit { associatedPullRequests(first:10) { nodes { mergedAt state baseRefName headRefName headRefOid } } } }", commitAlias, item.Head)
-			if base != "" {
+			if current.base != "" {
 				closedAlias := fmt.Sprintf("p%d", worktreeIndex)
 				current.closedRows[closedAlias] = row{repository: repositoryIndex, worktree: worktreeIndex}
-				fmt.Fprintf(&repositoryFields, "%s: pullRequests(first:10, states:CLOSED, headRefName:%q, baseRefName:%q) { nodes { mergedAt state baseRefName headRefName headRefOid } }", closedAlias, item.Branch, base)
+				fmt.Fprintf(&repositoryFields, "%s: pullRequests(first:10, states:CLOSED, headRefName:%q, baseRefName:%q) { nodes { mergedAt state baseRefName headRefName headRefOid } }", closedAlias, item.Branch, current.base)
 			}
 		}
 		if len(current.commitRows) > 0 {
@@ -363,9 +350,8 @@ func githubPullRequestRows(ctx context.Context, repositories []repository) (bool
 				continue
 			}
 			item := repositories[current.repository].Worktrees[current.worktree]
-			base := strings.TrimPrefix(repositories[current.repository].MergeTarget, "origin/")
 			for _, pullRequest := range commit.AssociatedPullRequests.Nodes {
-				if candidate := matchingPullRequestStatus(pullRequest, item, base); candidate > statuses[current] {
+				if candidate := matchingPullRequestStatus(pullRequest, item, repositoryQuery.base); candidate > statuses[current] {
 					statuses[current] = candidate
 				}
 			}
@@ -378,9 +364,8 @@ func githubPullRequestRows(ctx context.Context, repositories []repository) (bool
 				continue
 			}
 			item := repositories[current.repository].Worktrees[current.worktree]
-			base := strings.TrimPrefix(repositories[current.repository].MergeTarget, "origin/")
 			for _, pullRequest := range pullRequests.Nodes {
-				if candidate := matchingClosedPullRequestStatus(pullRequest, item, base); candidate > statuses[current] {
+				if candidate := matchingClosedPullRequestStatus(pullRequest, item, repositoryQuery.base); candidate > statuses[current] {
 					statuses[current] = candidate
 				}
 			}
@@ -671,6 +656,17 @@ func removeWorktree(ctx context.Context, repo repository, item worktree, deleteB
 		result.Err = fmt.Errorf("worktree is locked; unlock it before deletion")
 		return result
 	}
+	if item.Detached && item.Head != "" {
+		reachable, err := commitReachableFromRef(ctx, repo.MainPath, item.Head)
+		if err != nil {
+			result.Err = fmt.Errorf("check detached HEAD reachability: %w", err)
+			return result
+		}
+		if !reachable {
+			result.Err = fmt.Errorf("detached HEAD is not reachable from another branch, remote, or tag")
+			return result
+		}
+	}
 	if _, err := git(ctx, repo.MainPath, "worktree", "remove", "--force", item.Path); err != nil {
 		result.Err = err
 		return result
@@ -684,6 +680,14 @@ func removeWorktree(ctx context.Context, repo repository, item worktree, deleteB
 		result.BranchDeleted = true
 	}
 	return result
+}
+
+func commitReachableFromRef(ctx context.Context, directory, head string) (bool, error) {
+	output, err := git(ctx, directory, "for-each-ref", "--format=%(refname)", "--contains="+head, "refs/heads", "refs/remotes", "refs/tags")
+	if err != nil {
+		return false, err
+	}
+	return output != "", nil
 }
 
 func modificationTime(path string) time.Time {

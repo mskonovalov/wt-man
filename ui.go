@@ -69,13 +69,6 @@ type modificationTimeMsg struct {
 	modifiedAt time.Time
 }
 
-type mergeStatusMsg struct {
-	generation int
-	repository int
-	merged     map[string]bool
-	target     string
-}
-
 type githubPullRequestStatusMsg struct {
 	generation    int
 	authenticated bool
@@ -122,9 +115,6 @@ type model struct {
 	modificationQueue   []row
 	modificationTotal   int
 	modificationDone    int
-	mergeQueue          []int
-	mergeTotal          int
-	mergeDone           int
 	githubMergePending  bool
 	githubAuthChecked   bool
 	githubAuthAvailable bool
@@ -168,12 +158,6 @@ func newModel(repositories []repository) model {
 		branchWidth:     utf8.RuneCountInString("BRANCH"),
 	}
 	for repositoryIndex, repo := range repositories {
-		for _, item := range repo.Worktrees {
-			if item.Branch != "" {
-				m.mergeQueue = append(m.mergeQueue, repositoryIndex)
-				break
-			}
-		}
 		if width := utf8.RuneCountInString(repo.Name); width > m.repositoryWidth {
 			m.repositoryWidth = width
 		}
@@ -198,8 +182,7 @@ func newModel(repositories []repository) model {
 		}
 	}
 	m.modificationTotal = len(m.modificationQueue)
-	m.mergeTotal = len(m.mergeQueue)
-	m.githubMergePending = len(m.mergeQueue) == 0
+	m.githubMergePending = true
 	m.visible = append([]row(nil), m.rows...)
 	return m
 }
@@ -213,9 +196,7 @@ func (m model) Init() tea.Cmd {
 		current := m.modificationQueue[0]
 		commands = append(commands, scanModificationTime(m.generation, current, m.item(current).Path))
 	}
-	if len(m.mergeQueue) > 0 {
-		commands = append(commands, scanMergeStatus(m.generation, m.mergeQueue[0], m.repositories[m.mergeQueue[0]].MainPath))
-	} else if m.githubMergePending {
+	if m.githubMergePending {
 		commands = append(commands, m.scanGitHubMergeStatus())
 	}
 	return tea.Batch(commands...)
@@ -296,31 +277,6 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		current := m.modificationQueue[0]
 		return m, scanModificationTime(m.generation, current, m.item(current).Path)
-	case mergeStatusMsg:
-		if message.generation != m.generation {
-			return m, nil
-		}
-		repo := &m.repositories[message.repository]
-		repo.MergeTarget = message.target
-		for worktreeIndex := range repo.Worktrees {
-			item := &repo.Worktrees[worktreeIndex]
-			if item.Branch != "" && message.target != "" {
-				item.Merged = message.merged[item.Branch]
-				item.MergeKnown = true
-				item.MergeSource = "Git"
-			}
-		}
-		m.mergeQueue = m.mergeQueue[1:]
-		m.mergeDone++
-		if m.pullRequestMode != allPullRequestStatuses {
-			m.applyFilter()
-		}
-		if len(m.mergeQueue) > 0 {
-			next := m.mergeQueue[0]
-			return m, scanMergeStatus(m.generation, next, m.repositories[next].MainPath)
-		}
-		m.githubMergePending = true
-		return m, m.scanGitHubMergeStatus()
 	case githubPullRequestStatusMsg:
 		if message.generation != m.generation {
 			return m, nil
@@ -796,7 +752,6 @@ func (m model) browseView() string {
 		}
 	} else {
 		current := m.visible[m.cursor]
-		repo := m.repositories[current.repository]
 		item := m.item(current)
 		output.WriteByte('\n')
 		output.WriteString(truncate("Path: "+item.Path, m.width))
@@ -819,17 +774,6 @@ func (m model) browseView() string {
 			}
 		}
 		branchDetails += "  PR: " + pullRequestLabel(item)
-		if item.MergeKnown {
-			branchDetails += "  Merged into " + repo.MergeTarget + ": "
-			if item.Merged {
-				branchDetails += "yes"
-			} else {
-				branchDetails += "no"
-			}
-			if item.MergeSource != "" {
-				branchDetails += " (" + item.MergeSource + ")"
-			}
-		}
 		output.WriteString(truncate(branchDetails, m.width))
 		output.WriteByte('\n')
 		output.WriteString(sessionDetailsView(item.Sessions, m.width))
@@ -990,13 +934,6 @@ func scanSessionStatus() tea.Cmd {
 	}
 }
 
-func scanMergeStatus(generation, repositoryIndex int, path string) tea.Cmd {
-	return func() tea.Msg {
-		merged, target := mergedBranches(context.Background(), path)
-		return mergeStatusMsg{generation: generation, repository: repositoryIndex, merged: merged, target: target}
-	}
-}
-
 func (m model) scanGitHubMergeStatus() tea.Cmd {
 	repositories := make([]repository, len(m.repositories))
 	for repositoryIndex, repo := range m.repositories {
@@ -1032,11 +969,6 @@ func (m model) discoveryProgressView() string {
 func (m model) statusProgressView() string {
 	if m.discoveryPending {
 		return "PR check: waiting for repository scan"
-	}
-	if len(m.mergeQueue) > 0 {
-		repo := m.repositories[m.mergeQueue[0]]
-		return fmt.Sprintf("Git check %s %d/%d  %s",
-			progressBar(m.mergeDone, m.mergeTotal, 20), m.mergeDone, m.mergeTotal, repo.Name)
 	}
 	if m.githubMergePending {
 		return "PR check: querying GitHub"

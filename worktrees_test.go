@@ -172,23 +172,9 @@ func TestDiscoverAndRemoveExistingAndMissingWorktrees(t *testing.T) {
 	if len(repositories) != 1 || len(repositories[0].Worktrees) != 2 {
 		t.Fatalf("unexpected discovery result: %#v", repositories)
 	}
-	if repositories[0].MergeTarget != "" || repositories[0].Worktrees[0].MergeKnown {
-		t.Fatalf("merge status blocked initial discovery: %#v", repositories[0])
-	}
-	m := newModel(repositories)
-	message := scanMergeStatus(m.generation, 0, repositories[0].MainPath)()
-	updated, command := m.Update(message)
-	m = updated.(model)
-	if command == nil || m.repositories[0].MergeTarget != "main" {
-		t.Fatalf("background merge scan did not finish correctly: %#v", m.repositories[0])
-	}
-	repositories = m.repositories
 	for _, item := range repositories[0].Worktrees {
 		if item.Path == missingPath && !item.Missing {
 			t.Fatal("missing worktree was not marked missing")
-		}
-		if !item.MergeKnown || item.Merged != (item.Branch == "missing") {
-			t.Fatalf("unexpected merged status: %#v", item)
 		}
 		result := removeWorktree(ctx, repositories[0], item, false)
 		if result.Err != nil {
@@ -298,7 +284,61 @@ func TestRemoveWorktreeKeepsClosedUnmergedBranch(t *testing.T) {
 	}
 }
 
-func TestMergedBranchesUsesFullyQualifiedFallbackRefs(t *testing.T) {
+func TestRemoveWorktreeRefusesUnreachableDetachedHead(t *testing.T) {
+	ctx := context.Background()
+	repoPath := t.TempDir()
+	linkedPath := filepath.Join(t.TempDir(), "detached")
+	if _, err := git(ctx, repoPath, "init", "-b", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "-c", "user.name=wt-man", "-c", "user.email=wt-man@example.com", "commit", "--allow-empty", "-m", "initial"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "worktree", "add", "--detach", linkedPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, linkedPath, "-c", "user.name=wt-man", "-c", "user.email=wt-man@example.com", "commit", "--allow-empty", "-m", "detached work"); err != nil {
+		t.Fatal(err)
+	}
+	head, err := git(ctx, linkedPath, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := removeWorktree(ctx, repository{MainPath: repoPath}, worktree{Path: linkedPath, Head: head, Detached: true}, false)
+	if result.Err == nil || result.Removed || !strings.Contains(result.Err.Error(), "not reachable") {
+		t.Fatalf("unexpected detached deletion result: %#v", result)
+	}
+	if _, err := os.Stat(linkedPath); err != nil {
+		t.Fatalf("detached worktree was removed: %v", err)
+	}
+}
+
+func TestRemoveWorktreeAllowsReachableDetachedHead(t *testing.T) {
+	ctx := context.Background()
+	repoPath := t.TempDir()
+	linkedPath := filepath.Join(t.TempDir(), "detached")
+	if _, err := git(ctx, repoPath, "init", "-b", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "-c", "user.name=wt-man", "-c", "user.email=wt-man@example.com", "commit", "--allow-empty", "-m", "initial"); err != nil {
+		t.Fatal(err)
+	}
+	head, err := git(ctx, repoPath, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "worktree", "add", "--detach", linkedPath, head); err != nil {
+		t.Fatal(err)
+	}
+
+	result := removeWorktree(ctx, repository{MainPath: repoPath}, worktree{Path: linkedPath, Head: head, Detached: true}, false)
+	if result.Err != nil || !result.Removed {
+		t.Fatalf("unexpected reachable detached deletion result: %#v", result)
+	}
+}
+
+func TestDefaultBranchTargetUsesFullyQualifiedFallbackRefs(t *testing.T) {
 	ctx := context.Background()
 	repoPath := t.TempDir()
 	if _, err := git(ctx, repoPath, "init", "-b", "main"); err != nil {
@@ -325,9 +365,8 @@ func TestMergedBranchesUsesFullyQualifiedFallbackRefs(t *testing.T) {
 	if _, err := git(ctx, repoPath, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/missing"); err != nil {
 		t.Fatal(err)
 	}
-	merged, target := mergedBranches(ctx, repoPath)
-	if target != "main" || !merged["main"] {
-		t.Fatalf("fully qualified fallback was not used: target=%q merged=%#v", target, merged)
+	if target := defaultBranchTarget(ctx, repoPath); target != "main" {
+		t.Fatalf("fully qualified fallback was not used: target=%q", target)
 	}
 }
 
@@ -504,31 +543,27 @@ func TestModelUsesFullBranchWidthBeforePath(t *testing.T) {
 	}
 }
 
-func TestModelShowsMergeTargetAndStatus(t *testing.T) {
+func TestModelShowsPullRequestStatus(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	m := newModel([]repository{{
-		Name:        "example",
-		MergeTarget: "origin/main",
+		Name: "example",
 		Worktrees: []worktree{{
 			Path:              "/tmp/merged",
 			Branch:            "feature/merged",
-			MergeKnown:        true,
-			Merged:            true,
 			PullRequestKnown:  true,
 			PullRequestStatus: pullRequestMerged,
 		}},
 	}})
 
 	view := m.browseView()
-	if !strings.Contains(view, "PR") || !strings.Contains(view, "merged") || !strings.Contains(view, "Merged into origin/main: yes") {
-		t.Fatalf("PR and local merge statuses were not rendered: %q", view)
+	if !strings.Contains(view, "PR") || !strings.Contains(view, "merged") || strings.Contains(view, "Merged into") {
+		t.Fatalf("PR status was not rendered independently: %q", view)
 	}
 }
 
 func TestGitHubMergeStatusUpdatesRows(t *testing.T) {
 	m := newModel([]repository{{
-		Name:        "example",
-		MergeTarget: "origin/main",
+		Name: "example",
 		Worktrees: []worktree{
 			{Path: "/tmp/merged", Branch: "feature/merged"},
 			{Path: "/tmp/closed", Branch: "feature/closed"},
@@ -555,8 +590,8 @@ func TestGitHubMergeStatusUpdatesRows(t *testing.T) {
 	if m.githubMergePending || !m.githubAuthChecked || !m.githubAuthAvailable {
 		t.Fatalf("GitHub check did not finish: %#v", m)
 	}
-	if !merged.PullRequestKnown || merged.PullRequestStatus != pullRequestMerged || merged.Merged {
-		t.Fatalf("GitHub merged PR status was not kept separate from local merge status: %#v", merged)
+	if !merged.PullRequestKnown || merged.PullRequestStatus != pullRequestMerged {
+		t.Fatalf("GitHub merged PR status was not applied: %#v", merged)
 	}
 	if closed.PullRequestStatus != pullRequestClosed || open.PullRequestStatus != pullRequestOpen || !notApplicable.PullRequestKnown || notApplicable.PullRequestStatus != pullRequestUnmatched {
 		t.Fatalf("GitHub PR statuses were not applied: merged=%#v closed=%#v open=%#v n/a=%#v", merged, closed, open, notApplicable)
