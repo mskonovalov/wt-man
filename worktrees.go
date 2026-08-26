@@ -284,7 +284,7 @@ func findGitRoots(root string) ([]string, error) {
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
-		if isBareGitDirectory(directory) {
+		if isStandaloneGitDirectory(directory) {
 			roots = append(roots, directory)
 			return nil
 		}
@@ -305,10 +305,22 @@ func findGitRoots(root string) ([]string, error) {
 	return roots, visit(root)
 }
 
-func isBareGitDirectory(directory string) bool {
+func isStandaloneGitDirectory(directory string) bool {
 	head, headErr := os.Stat(filepath.Join(directory, "HEAD"))
 	objects, objectsErr := os.Stat(filepath.Join(directory, "objects"))
-	return headErr == nil && head.Mode().IsRegular() && objectsErr == nil && objects.IsDir()
+	if headErr != nil || !head.Mode().IsRegular() || objectsErr != nil || !objects.IsDir() {
+		return false
+	}
+	gitDirectory, err := git(context.Background(), directory, "rev-parse", "--path-format=absolute", "--absolute-git-dir")
+	if err != nil {
+		return false
+	}
+	gitDirectory, err = canonicalPath(gitDirectory)
+	if err != nil {
+		return false
+	}
+	directory, err = canonicalPath(directory)
+	return err == nil && gitDirectory == directory
 }
 
 func parseWorktrees(output string) ([]worktree, error) {
@@ -386,7 +398,15 @@ func readClaudeSessions() (map[string]map[string]bool, bool) {
 			available = false
 			return nil
 		}
-		if session.IsArchived == nil || *session.IsArchived || session.CWD == "" {
+		if session.IsArchived == nil {
+			available = false
+			return nil
+		}
+		if *session.IsArchived {
+			return nil
+		}
+		if session.SessionID == "" || session.CWD == "" {
+			available = false
 			return nil
 		}
 		cwd, err := canonicalPath(session.CWD)
