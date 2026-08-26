@@ -222,7 +222,19 @@ func TestMergedBranchesUsesFullyQualifiedFallbackRefs(t *testing.T) {
 	if _, err := git(ctx, repoPath, "-c", "user.name=wt-man", "-c", "user.email=wt-man@example.com", "commit", "--allow-empty", "-m", "initial"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := git(ctx, repoPath, "switch", "--orphan", "tag-target"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "-c", "user.name=wt-man", "-c", "user.email=wt-man@example.com", "commit", "--allow-empty", "-m", "unrelated tag target"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := git(ctx, repoPath, "update-ref", "refs/tags/main", "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "switch", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, repoPath, "branch", "-D", "tag-target"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := git(ctx, repoPath, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/missing"); err != nil {
@@ -231,6 +243,58 @@ func TestMergedBranchesUsesFullyQualifiedFallbackRefs(t *testing.T) {
 	merged, target := mergedBranches(ctx, repoPath)
 	if target != "main" || !merged["main"] {
 		t.Fatalf("fully qualified fallback was not used: target=%q merged=%#v", target, merged)
+	}
+}
+
+func TestGitDirectoryHeuristicDoesNotPruneOrdinarySubtree(t *testing.T) {
+	root := t.TempDir()
+	container := filepath.Join(root, "ordinary")
+	nested := filepath.Join(container, "nested")
+	if err := os.MkdirAll(filepath.Join(container, "objects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(container, "HEAD"), []byte("not Git"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(context.Background(), container, "init", "-b", "main", nested); err != nil {
+		t.Fatal(err)
+	}
+	roots, err := findGitRoots(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nested, _ = canonicalPath(nested)
+	if len(roots) == 1 {
+		roots[0], _ = canonicalPath(roots[0])
+	}
+	if len(roots) != 1 || roots[0] != nested {
+		t.Fatalf("ordinary directory pruned nested repository: %#v", roots)
+	}
+}
+
+func TestBrokenDotGitDoesNotPruneNestedRepository(t *testing.T) {
+	root := t.TempDir()
+	container := filepath.Join(root, "ordinary")
+	nested := filepath.Join(container, "nested")
+	if err := os.MkdirAll(container, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(container, ".git"), []byte("gitdir: /does/not/exist\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(context.Background(), container, "init", "-b", "main", nested); err != nil {
+		t.Fatal(err)
+	}
+	roots, err := findGitRoots(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nested, _ = canonicalPath(nested)
+	if len(roots) == 1 {
+		roots[0], _ = canonicalPath(roots[0])
+	}
+	if len(roots) != 1 || roots[0] != nested {
+		t.Fatalf("broken .git entry pruned nested repository: %#v", roots)
 	}
 }
 
@@ -576,6 +640,16 @@ func TestReadClaudeSessionsFromFixture(t *testing.T) {
 	if known {
 		t.Fatal("malformed Claude session source was reported as known")
 	}
+	if err := os.Remove(filepath.Join(base, "local_broken.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "local_incomplete.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, known = readClaudeSessions()
+	if known {
+		t.Fatal("structurally incomplete Claude session source was reported as known")
+	}
 }
 
 func TestAssignSessionsUsesDeepestContainingWorktree(t *testing.T) {
@@ -608,8 +682,28 @@ func TestLockedWorktreeIsRefusedAndExplained(t *testing.T) {
 	m.selected[item.Path] = true
 	m.screen = reviewScreen
 	view := m.reviewView()
-	if !strings.Contains(view, "LOCKED: will not delete (in use)") {
+	if !strings.Contains(view, "LOCKED: will not delete (in use)") || strings.Contains(view, "delete files and Git record") {
 		t.Fatalf("locked state was not explained: %q", view)
+	}
+}
+
+func TestReviewDoesNotRenderUnknownProviderAsZero(t *testing.T) {
+	item := worktree{Path: "/tmp/session", Sessions: sessionCounts{Claude: 2, ClaudeKnown: true}}
+	m := newModel([]repository{{Name: "example", Worktrees: []worktree{item}}})
+	m.selected[item.Path] = true
+	view := m.reviewView()
+	if !strings.Contains(view, "Claude 2 unarchived") || !strings.Contains(view, "Codex session status unknown") || strings.Contains(view, "Codex 0") {
+		t.Fatalf("unknown provider was rendered as a zero count: %q", view)
+	}
+}
+
+func TestBrowseHeaderIsBoundedToTerminalWidth(t *testing.T) {
+	m := newModel([]repository{{Name: strings.Repeat("repository", 20), Worktrees: []worktree{{Path: "/tmp/one"}}}})
+	m.width = 40
+	for _, line := range strings.Split(m.browseView(), "\n") {
+		if strings.Contains(line, "REPOSITORY") && len([]rune(line)) > m.width {
+			t.Fatalf("header width %d exceeds terminal width %d: %q", len([]rune(line)), m.width, line)
+		}
 	}
 }
 

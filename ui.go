@@ -499,16 +499,19 @@ func (m model) browseView() string {
 	}
 	compact := m.compactRows()
 	pathWidth := m.pathColumnWidth()
+	var header string
 	if compact {
-		fmt.Fprintf(&output, "      %-*s %-10s %-10s %-8s %s\n",
+		header = fmt.Sprintf("      %-*s %-10s %-10s %-8s %s",
 			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "MERGED")
 	} else if pathWidth > 0 {
-		fmt.Fprintf(&output, "      %-*s %-10s %-10s %-8s %-6s %-*s %s\n",
+		header = fmt.Sprintf("      %-*s %-10s %-10s %-8s %-6s %-*s %s",
 			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "MERGED", m.branchWidth, "BRANCH", "PATH")
 	} else {
-		fmt.Fprintf(&output, "      %-*s %-10s %-10s %-8s %-6s %s\n",
+		header = fmt.Sprintf("      %-*s %-10s %-10s %-8s %-6s %s",
 			m.repositoryWidth, "REPOSITORY", "CREATED", "MODIFIED", "SESSIONS", "MERGED", "BRANCH")
 	}
+	output.WriteString(truncate(header, m.width))
+	output.WriteByte('\n')
 	for index := m.offset; index < end; index++ {
 		current := m.visible[index]
 		repo := m.repositories[current.repository]
@@ -715,13 +718,22 @@ func (m model) reviewView() string {
 			}
 			output.WriteString("\x1b[0m")
 		}
-		if item.Missing {
-			output.WriteString("  \x1b[33mmissing: delete Git record only\x1b[0m")
-		} else {
-			output.WriteString("  delete files and Git record")
+		if !item.Locked {
+			if item.Missing {
+				output.WriteString("  \x1b[33mmissing: delete Git record only\x1b[0m")
+			} else {
+				output.WriteString("  delete files and Git record")
+			}
 		}
 		if item.Sessions.Claude+item.Sessions.Codex > 0 {
-			fmt.Fprintf(&output, "  \x1b[33mClaude %d, Codex %d unarchived\x1b[0m", item.Sessions.Claude, item.Sessions.Codex)
+			var active []string
+			if item.Sessions.Claude > 0 {
+				active = append(active, fmt.Sprintf("Claude %d", item.Sessions.Claude))
+			}
+			if item.Sessions.Codex > 0 {
+				active = append(active, fmt.Sprintf("Codex %d", item.Sessions.Codex))
+			}
+			fmt.Fprintf(&output, "  \x1b[33m%s unarchived\x1b[0m", strings.Join(active, ", "))
 		}
 		if !item.Sessions.ClaudeKnown || !item.Sessions.CodexKnown {
 			var unknown []string

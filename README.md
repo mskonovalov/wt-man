@@ -2,7 +2,7 @@
 
 wt-man is an interactive manager for Git worktrees spread across many repositories.
 
-It scans ~/work by default, groups linked worktrees by repository, and orders each group by creation time. The terminal UI supports filtering, multi-selection, unarchived Claude/Codex session warnings, bulk removal, and optional local branch deletion.
+It scans ~/work by default and groups linked worktrees by repository. On macOS, each group is ordered by filesystem creation time; on other platforms, it retains Git's worktree-list order because a reliable creation time may be unavailable. The terminal UI supports filtering, multi-selection, unarchived Claude/Codex session warnings, bulk removal, and optional local branch deletion.
 
 ## Install
 
@@ -40,7 +40,7 @@ Keys:
 - q: quit
 
 Deletion uses `git worktree remove --force`. Locked worktrees are identified in the list and review screen and are refused until you explicitly unlock them with Git. The review screen always appears before anything is removed.
-For an existing worktree, deletion removes both its directory and Git's worktree record. `missing (prunable)` means the directory no longer exists but Git still has a stale record; deleting it removes only that record.
+For an existing worktree, deletion removes both its directory and Git's worktree record. `missing (Git record only)` means the directory no longer exists but Git still has a stale record; `; prunable` is added when Git reports that state. Deleting either missing state removes only the record.
 Optional branch cleanup uses Git's safe `git branch -d` check, so an unmerged local branch is kept even after its worktree has been removed.
 
 On macOS, the created column uses the worktree directory's filesystem birth time. It displays `unknown` on platforms where a reliable creation timestamp is unavailable. The modified column is the newest filesystem modification time anywhere under the worktree; it is scanned in the background and does not follow symbolic links. Results are cached for 24 hours in the operating system's user cache directory.
