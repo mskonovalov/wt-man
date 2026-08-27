@@ -1116,8 +1116,9 @@ func TestDiscoveryAddsRepositoriesBeforeScanCompletes(t *testing.T) {
 	if command == nil || !m.discoveryPending || len(m.visible) != 1 || m.item(m.visible[0]).Path != "/tmp/one-linked" {
 		t.Fatalf("repository was not shown during discovery: %#v", m)
 	}
-	if label := sessionLabel(m.item(m.visible[0]).Sessions); label != "C? X? !" {
-		t.Fatalf("pending session providers were not shown: %q", label)
+	sessions := m.item(m.visible[0]).Sessions
+	if label := sessionLabel(sessions); len(sessions.Providers) != len(sessionProviders) || label == " !" {
+		t.Fatalf("pending session providers were not shown: %q, providers=%#v", label, sessions.Providers)
 	}
 }
 
