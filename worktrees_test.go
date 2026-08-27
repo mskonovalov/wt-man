@@ -874,7 +874,7 @@ func TestReadClaudeSessionsFromFixture(t *testing.T) {
 	}
 	sessions, known := readClaudeSessions()
 	cwd, _ = canonicalPath(cwd)
-	if detail, ok := sessions[cwd]["abc"]; !known || !ok || detail.Title != "Fix checkout" || detail.Model != "claude-opus" || detail.UpdatedAt.UnixMilli() != 1770000300000 {
+	if detail, ok := sessions[cwd]["abc"]; !known || !ok || detail.Title != "Fix checkout" || detail.Model != "claude-opus" || detail.URL != "claude://resume?session=abc" || detail.UpdatedAt.UnixMilli() != 1770000300000 {
 		t.Fatalf("unexpected sessions: %#v, known=%v", sessions, known)
 	}
 	if err := os.WriteFile(filepath.Join(base, "local_broken.json"), []byte("{"), 0o644); err != nil {
@@ -910,15 +910,15 @@ func TestReadCodexSessionDetailsFromFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	database := filepath.Join(codexHome, "sqlite", "state_5.sqlite")
-	schema := "CREATE TABLE threads (cwd TEXT, title TEXT, model TEXT, updated_at INTEGER, updated_at_ms INTEGER, archived INTEGER);" +
-		"INSERT INTO threads VALUES ('" + cwd + "', 'Review worktrees', 'gpt-5.6', 1770000000, 1770000300000, 0);" +
-		"INSERT INTO threads VALUES ('" + cwd + "', 'Archived task', 'gpt-5.6', 1770000000, 1770000300000, 1);"
+	schema := "CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, model TEXT, updated_at INTEGER, updated_at_ms INTEGER, archived INTEGER);" +
+		"INSERT INTO threads VALUES ('codex-session', '" + cwd + "', 'Review worktrees', 'gpt-5.6', 1770000000, 1770000300000, 0);" +
+		"INSERT INTO threads VALUES ('archived-session', '" + cwd + "', 'Archived task', 'gpt-5.6', 1770000000, 1770000300000, 1);"
 	if output, err := exec.Command("sqlite3", database, schema).CombinedOutput(); err != nil {
 		t.Fatalf("create Codex fixture: %v: %s", err, output)
 	}
 	sessions, known := readCodexSessions(context.Background())
 	cwd, _ = canonicalPath(cwd)
-	if !known || len(sessions[cwd]) != 1 || sessions[cwd][0].Title != "Review worktrees" || sessions[cwd][0].Model != "gpt-5.6" || sessions[cwd][0].UpdatedAt.UnixMilli() != 1770000300000 {
+	if !known || len(sessions[cwd]) != 1 || sessions[cwd][0].Title != "Review worktrees" || sessions[cwd][0].Model != "gpt-5.6" || sessions[cwd][0].URL != "codex://threads/codex-session" || sessions[cwd][0].UpdatedAt.UnixMilli() != 1770000300000 {
 		t.Fatalf("unexpected sessions: %#v, known=%v", sessions, known)
 	}
 }
@@ -979,10 +979,10 @@ func TestBrowseShowsRecentSessionDetailsBelowSelectedWorktree(t *testing.T) {
 			Claude: 2, Codex: 2, ClaudeKnown: true, CodexKnown: true,
 			ClaudeSessions: []sessionDetail{
 				{Title: "Old Claude task", UpdatedAt: time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)},
-				{Title: "Newest Claude task", Model: "claude-opus", UpdatedAt: time.Date(2026, 8, 26, 15, 0, 0, 0, time.UTC)},
+				{Title: "Newest Claude task", Model: "claude-opus", URL: "claude://resume?session=claude-session", UpdatedAt: time.Date(2026, 8, 26, 15, 0, 0, 0, time.UTC)},
 			},
 			CodexSessions: []sessionDetail{
-				{Title: "Middle Codex task", Model: "gpt-5.6", UpdatedAt: time.Date(2026, 8, 25, 14, 0, 0, 0, time.UTC)},
+				{Title: "Middle Codex task", Model: "gpt-5.6", URL: "codex://threads/codex-session", UpdatedAt: time.Date(2026, 8, 25, 14, 0, 0, 0, time.UTC)},
 				{Title: "Another Codex task", UpdatedAt: time.Date(2026, 8, 24, 13, 0, 0, 0, time.UTC)},
 			},
 		},
@@ -990,15 +990,21 @@ func TestBrowseShowsRecentSessionDetailsBelowSelectedWorktree(t *testing.T) {
 	m := newModel([]repository{{Name: "example", Worktrees: []worktree{item}}})
 	m.width = 160
 	view := m.browseView()
-	pathIndex := strings.Index(view, "Path: ")
-	titleIndex := strings.Index(view, `Claude: "Newest Claude task"`)
+	plainView := ansi.Strip(view)
+	pathIndex := strings.Index(plainView, "Path: ")
+	titleIndex := strings.Index(plainView, `Claude: "Newest Claude task"`)
 	if pathIndex == -1 || titleIndex < pathIndex {
 		t.Fatalf("session details were not rendered below the selected worktree: %q", view)
 	}
-	if !strings.Contains(view, "claude-opus · active 2026-08-26 15:00") ||
-		!strings.Contains(view, `Codex: "Middle Codex task"`) ||
-		!strings.Contains(view, "+1 more") || strings.Contains(view, "Old Claude task") {
+	if !strings.Contains(plainView, "claude-opus · active 2026-08-26 15:00") ||
+		!strings.Contains(plainView, `Codex: "Middle Codex task"`) ||
+		!strings.Contains(plainView, "+1 more") || strings.Contains(plainView, "Old Claude task") {
 		t.Fatalf("recent session details were rendered incorrectly: %q", view)
+	}
+	claudeLink := ansi.SetHyperlink("claude://resume?session=claude-session") + ansi.Style{}.Underline(true).Styled(`"Newest Claude task"`) + ansi.ResetHyperlink()
+	codexLink := ansi.SetHyperlink("codex://threads/codex-session") + ansi.Style{}.Underline(true).Styled(`"Middle Codex task"`) + ansi.ResetHyperlink()
+	if !strings.Contains(view, "Claude: "+claudeLink) || !strings.Contains(view, "Codex: "+codexLink) {
+		t.Fatalf("session titles were not rendered as links: %q", view)
 	}
 }
 
@@ -1023,6 +1029,22 @@ func TestBrowseDetailAreaHasFixedHeight(t *testing.T) {
 	}
 	if height := strings.Count(m.browseView(), "\n"); height != withoutSessionsHeight {
 		t.Fatalf("detail area changed view height from %d to %d lines", withoutSessionsHeight, height)
+	}
+}
+
+func TestSessionDetailsTruncateTitleBeforeMetadata(t *testing.T) {
+	sessions := sessionCounts{ClaudeSessions: []sessionDetail{{
+		Title:     strings.Repeat("Long session title ", 8),
+		Model:     "claude-opus",
+		URL:       "claude://resume?session=long-session",
+		UpdatedAt: time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC),
+	}}}
+	lines := strings.Split(ansi.Strip(sessionDetailsView(sessions, 64)), "\n")
+	if len(lines) < 2 || !strings.Contains(lines[1], "…") || !strings.HasSuffix(lines[1], " · claude-opus · active 2026-08-27 12:00") {
+		t.Fatalf("session title was not truncated before its metadata: %q", lines)
+	}
+	if ansi.StringWidth(lines[1]) > 64 {
+		t.Fatalf("session detail width %d exceeds terminal width: %q", ansi.StringWidth(lines[1]), lines[1])
 	}
 }
 

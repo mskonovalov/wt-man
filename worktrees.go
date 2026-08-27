@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +33,7 @@ type sessionCounts struct {
 type sessionDetail struct {
 	Title     string
 	Model     string
+	URL       string
 	UpdatedAt time.Time
 }
 
@@ -606,7 +608,7 @@ func readClaudeSessions() (map[string]map[string]sessionDetail, bool) {
 			updatedAt = session.CreatedAt
 		}
 		result[cwd][session.SessionID] = sessionDetail{
-			Title: session.Title, Model: session.Model, UpdatedAt: sessionTime(updatedAt),
+			Title: session.Title, Model: session.Model, URL: "claude://resume?session=" + url.QueryEscape(session.SessionID), UpdatedAt: sessionTime(updatedAt),
 		}
 		return nil
 	})
@@ -631,11 +633,12 @@ func readCodexSessions(ctx context.Context) (map[string][]sessionDetail, bool) {
 		return result, false
 	}
 	output, err := exec.CommandContext(ctx, "sqlite3", "-json", database,
-		"SELECT cwd, title, COALESCE(model, '') AS model, COALESCE(updated_at_ms, updated_at * 1000) AS updated_at_ms FROM threads WHERE archived = 0;").Output()
+		"SELECT id, cwd, title, COALESCE(model, '') AS model, COALESCE(updated_at_ms, updated_at * 1000) AS updated_at_ms FROM threads WHERE archived = 0;").Output()
 	if err != nil {
 		return result, false
 	}
 	var sessions []struct {
+		ID          string `json:"id"`
 		CWD         string `json:"cwd"`
 		Title       string `json:"title"`
 		Model       string `json:"model"`
@@ -649,7 +652,7 @@ func readCodexSessions(ctx context.Context) (map[string][]sessionDetail, bool) {
 		cwd, err := canonicalPath(session.CWD)
 		if err == nil {
 			result[cwd] = append(result[cwd], sessionDetail{
-				Title: session.Title, Model: session.Model, UpdatedAt: sessionTime(session.UpdatedAtMS),
+				Title: session.Title, Model: session.Model, URL: "codex://threads/" + url.PathEscape(session.ID), UpdatedAt: sessionTime(session.UpdatedAtMS),
 			})
 		} else {
 			available = false
