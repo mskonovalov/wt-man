@@ -197,16 +197,35 @@ func TestMoveWaitsForActiveModificationScan(t *testing.T) {
 	}
 }
 
-func TestMoveConfirmationWarnsAboutSessions(t *testing.T) {
+func TestMoveShowsProviderSpecificSessionHints(t *testing.T) {
 	repo, item, root := createMoveTestWorktree(t)
-	item.Sessions = sessionCounts{Claude: 1, Codex: 1, ClaudeKnown: true, CodexKnown: true}
+	item.Sessions = worktreeSessions{Providers: []worktreeSessionProvider{
+		{Provider: claudeSessionProvider{}, Name: "Claude", Known: true, Sessions: []agentSession{{ID: "claude-id", ArchiveStatus: sessionArchiveUnarchived}}},
+		{Provider: codexSessionProvider{}, Name: "Codex", Known: true, Sessions: []agentSession{{ID: "codex-id", ArchiveStatus: sessionArchiveUnarchived}}},
+		{Provider: cursorSessionProvider{}, Name: "Cursor", Known: true, Sessions: []agentSession{{ID: "cursor-id", Title: "Cursor task", ArchiveStatus: sessionArchiveUnknown}}},
+	}}
 	m := newModel([]repository{{Name: repo.Name, MainPath: repo.MainPath, Worktrees: []worktree{item}}})
 	m.root = root
 	m.moveRow = m.rows[0]
 	m.moveDestination = filepath.Join(root, "elsewhere", filepath.Base(item.Path))
 	m.screen = moveConfirmScreen
-	if view := m.moveConfirmView(); !strings.Contains(view, "2 unarchived session(s)") {
-		t.Fatalf("session warning was not rendered: %q", view)
+	view := m.moveConfirmView()
+	for _, expected := range []string{"claude --resume 'claude-id'", "codex resume -C", "cursor '", "reopen 'Cursor task'"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("missing %q in session guidance: %q", expected, view)
+		}
+	}
+}
+
+func TestMoveWithNoSessionsShowsNoSessionGuidance(t *testing.T) {
+	repo, item, root := createMoveTestWorktree(t)
+	m := newModel([]repository{{Name: repo.Name, MainPath: repo.MainPath, Worktrees: []worktree{item}}})
+	m.root = root
+	m.moveRow = m.rows[0]
+	m.moveDestination = filepath.Join(root, "elsewhere", filepath.Base(item.Path))
+	m.screen = moveConfirmScreen
+	if view := m.moveConfirmView(); strings.Contains(view, "Resume sessions") {
+		t.Fatalf("session guidance was shown without sessions: %q", view)
 	}
 }
 

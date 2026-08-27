@@ -14,6 +14,14 @@ func (cursorSessionProvider) Name() string {
 	return "Cursor"
 }
 
+func (cursorSessionProvider) MoveHint(session agentSession, destination string) string {
+	title := session.Title
+	if title == "" {
+		title = session.ID
+	}
+	return "Cursor: cursor " + shellQuote(destination) + "; reopen " + shellQuote(title) + " from chat history"
+}
+
 func (cursorSessionProvider) Sessions(ctx context.Context) ([]agentSession, error) {
 	if _, err := exec.LookPath("sqlite3"); err != nil {
 		return nil, err

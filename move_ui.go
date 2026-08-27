@@ -83,6 +83,11 @@ func (m model) beginMove() (tea.Model, tea.Cmd) {
 	m.moveRow = m.visible[m.cursor]
 	item := m.item(m.moveRow)
 	repo := m.repositories[m.moveRow.repository]
+	if m.sessionsPending {
+		m.moveResult = worktreeMoveResult{Source: item.Path, Err: fmt.Errorf("cannot move until the session scan finishes")}
+		m.screen = moveResultScreen
+		return m, nil
+	}
 	if err := worktreeMoveUnavailable(repo, item); err != nil {
 		m.moveResult = worktreeMoveResult{Source: item.Path, Err: err}
 		m.screen = moveResultScreen
@@ -320,8 +325,12 @@ func (m model) moveConfirmView() string {
 	output.WriteByte('\n')
 	output.WriteString(truncate("To:   "+m.moveDestination, m.width))
 	output.WriteByte('\n')
-	if count := item.Sessions.Claude + item.Sessions.Codex; count > 0 {
-		fmt.Fprintf(&output, "\n\x1b[33mWarning: %d unarchived session(s) still reference the old path.\x1b[0m\n", count)
+	if hints := moveSessionHints(item.Sessions, m.moveDestination); len(hints) > 0 {
+		output.WriteString("\n\x1b[33mResume sessions after moving:\x1b[0m\n")
+		for _, hint := range hints {
+			output.WriteString("  " + hint)
+			output.WriteByte('\n')
+		}
 	}
 	output.WriteString("\n[enter] move  [b] back  [esc] cancel\n")
 	return output.String()
@@ -353,6 +362,26 @@ func (m model) moveResultView() string {
 	}
 	output.WriteString("\n\x1b[1mWorktree moved\x1b[0m\n\n")
 	output.WriteString(truncate(m.moveResult.Source+" → "+m.moveResult.Destination, m.width))
+	if hints := moveSessionHints(m.item(m.moveRow).Sessions, m.moveResult.Destination); len(hints) > 0 {
+		output.WriteString("\n\nResume sessions:\n")
+		for _, hint := range hints {
+			output.WriteString("  " + hint)
+			output.WriteByte('\n')
+		}
+	}
 	output.WriteString("\n\n[enter] return to list  [q] quit\n")
 	return output.String()
+}
+
+func moveSessionHints(sessions worktreeSessions, destination string) []string {
+	var hints []string
+	for _, provider := range sessions.Providers {
+		if provider.Provider == nil {
+			continue
+		}
+		for _, session := range provider.visibleSessions() {
+			hints = append(hints, provider.Provider.MoveHint(session, destination))
+		}
+	}
+	return hints
 }

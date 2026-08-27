@@ -237,7 +237,7 @@ func assignSessions(repositories []repository, providers []sessionProviderResult
 			item := &repositories[repositoryIndex].Worktrees[worktreeIndex]
 			item.Sessions.Providers = make([]worktreeSessionProvider, len(providers))
 			for providerIndex, provider := range providers {
-				item.Sessions.Providers[providerIndex] = worktreeSessionProvider{Name: provider.Name, Known: provider.Err == nil}
+				item.Sessions.Providers[providerIndex] = worktreeSessionProvider{Provider: provider.Provider, Name: provider.Name, Known: provider.Err == nil}
 			}
 		}
 	}

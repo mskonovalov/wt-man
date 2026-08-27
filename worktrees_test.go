@@ -28,6 +28,10 @@ func (provider stubSessionProvider) Sessions(context.Context) ([]agentSession, e
 	return provider.sessions, provider.err
 }
 
+func (provider stubSessionProvider) MoveHint(session agentSession, destination string) string {
+	return provider.name + ": " + session.ID + " -> " + destination
+}
+
 func TestParseWorktrees(t *testing.T) {
 	output := "worktree /tmp/repo\n" +
 		"HEAD abc123\n" +
