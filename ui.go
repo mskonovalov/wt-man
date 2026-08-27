@@ -293,12 +293,14 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			item.PullRequestStatus = pullRequestUnmatched
 			item.PullRequestTitle = ""
 			item.PullRequestURL = ""
+			item.PullRequestNumber = 0
 		}
 		for current, pullRequest := range message.pullRequests {
 			item := &m.repositories[current.repository].Worktrees[current.worktree]
 			item.PullRequestStatus = pullRequest.Status
 			item.PullRequestTitle = pullRequest.Title
 			item.PullRequestURL = pullRequest.URL
+			item.PullRequestNumber = pullRequest.Number
 		}
 		if m.pullRequestMode != allPullRequestStatuses {
 			m.applyFilter()
@@ -792,8 +794,11 @@ func (m model) browseView() string {
 		pullRequestDetails := "[" + pullRequestLabel(item) + "]"
 		if item.PullRequestTitle != "" {
 			pullRequestTitle := item.PullRequestTitle
+			if item.PullRequestNumber > 0 {
+				pullRequestTitle = fmt.Sprintf("#%d %s", item.PullRequestNumber, pullRequestTitle)
+			}
 			if item.PullRequestURL != "" {
-				pullRequestTitle = ansi.SetHyperlink(item.PullRequestURL) + pullRequestTitle + ansi.ResetHyperlink()
+				pullRequestTitle = ansi.SetHyperlink(item.PullRequestURL) + ansi.Style{}.Underline(true).Styled(pullRequestTitle) + ansi.ResetHyperlink()
 			}
 			pullRequestDetails += " - " + pullRequestTitle
 		}
