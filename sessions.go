@@ -48,6 +48,7 @@ type worktreeSessionProvider struct {
 var sessionProviders = []sessionProvider{
 	claudeSessionProvider{},
 	codexSessionProvider{},
+	cursorSessionProvider{},
 }
 
 func readSessionProviders(ctx context.Context, providers []sessionProvider) []sessionProviderResult {
@@ -96,6 +97,16 @@ func (provider worktreeSessionProvider) unarchivedSessions() []agentSession {
 	var sessions []agentSession
 	for _, session := range provider.Sessions {
 		if session.ArchiveStatus == sessionArchiveUnarchived {
+			sessions = append(sessions, session)
+		}
+	}
+	return sessions
+}
+
+func (provider worktreeSessionProvider) visibleSessions() []agentSession {
+	var sessions []agentSession
+	for _, session := range provider.Sessions {
+		if session.ArchiveStatus != sessionArchiveArchived {
 			sessions = append(sessions, session)
 		}
 	}

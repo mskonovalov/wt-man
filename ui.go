@@ -805,8 +805,11 @@ func sessionLabel(sessions worktreeSessions) string {
 	var labels []string
 	for _, provider := range sessions.Providers {
 		count := "?"
-		if provider.archiveStatusKnown() {
+		if provider.Known {
 			count = fmt.Sprint(len(provider.unarchivedSessions()))
+			if !provider.archiveStatusKnown() {
+				count += "?"
+			}
 		}
 		labels = append(labels, sessionProviderAbbreviation(provider.Name)+count)
 	}
@@ -823,6 +826,8 @@ func sessionProviderAbbreviation(provider string) string {
 		return "C"
 	case "Codex":
 		return "X"
+	case "Cursor":
+		return "Cu"
 	default:
 		return provider
 	}
@@ -838,7 +843,7 @@ func (m model) sessionDetailsHeight() int {
 func sessionDetailsView(sessions worktreeSessions, width int) string {
 	var details []displayedSession
 	for _, provider := range sessions.Providers {
-		for _, detail := range provider.unarchivedSessions() {
+		for _, detail := range provider.visibleSessions() {
 			details = append(details, displayedSession{provider: provider.Name, detail: detail})
 		}
 	}
@@ -862,6 +867,9 @@ func sessionDetailsView(sessions worktreeSessions, width int) string {
 		}
 		if !session.detail.UpdatedAt.IsZero() {
 			metadata += " · active " + session.detail.UpdatedAt.Format("2006-01-02 15:04")
+		}
+		if session.detail.ArchiveStatus == sessionArchiveUnknown {
+			metadata += " · archive unknown"
 		}
 		title = ansi.Truncate(title, max(width-ansi.StringWidth(prefix)-ansi.StringWidth(metadata)-2, 1), "…")
 		sessionTitle := fmt.Sprintf("%q", title)
