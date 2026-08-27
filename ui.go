@@ -522,10 +522,10 @@ func (m model) finishDiscovery() (tea.Model, tea.Cmd) {
 }
 
 func (m model) pageSize() int {
-	if m.height < 14 {
+	if m.height < 13 {
 		return 1
 	}
-	size := m.height - 14
+	size := m.height - 13
 	if len(m.modificationQueue) > 0 {
 		size--
 	}
@@ -789,17 +789,15 @@ func (m model) browseView() string {
 		}
 		output.WriteString(truncate(branchDetails, m.width))
 		output.WriteByte('\n')
-		pullRequestDetails := "PR: " + pullRequestLabel(item)
+		pullRequestDetails := "[" + pullRequestLabel(item) + "]"
 		if item.PullRequestTitle != "" {
-			pullRequestDetails += " — " + item.PullRequestTitle
+			pullRequestTitle := item.PullRequestTitle
+			if item.PullRequestURL != "" {
+				pullRequestTitle = ansi.SetHyperlink(item.PullRequestURL) + pullRequestTitle + ansi.ResetHyperlink()
+			}
+			pullRequestDetails += " - " + pullRequestTitle
 		}
-		output.WriteString(truncate(pullRequestDetails, m.width))
-		output.WriteByte('\n')
-		pullRequestURL := item.PullRequestURL
-		if pullRequestURL == "" {
-			pullRequestURL = "n/a"
-		}
-		output.WriteString(truncate("PR link: "+pullRequestURL, m.width))
+		output.WriteString(ansi.Truncate(pullRequestDetails, m.width, "…"))
 		output.WriteByte('\n')
 		sessionDetails := sessionDetailsView(item.Sessions, m.width)
 		output.WriteString(sessionDetails)

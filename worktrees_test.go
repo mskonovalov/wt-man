@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestParseWorktrees(t *testing.T) {
@@ -643,7 +644,8 @@ func TestGitHubMergeStatusUpdatesRows(t *testing.T) {
 	}
 	m.cursor = 1
 	view := m.browseView()
-	if !strings.Contains(view, "closed") || !strings.Contains(view, "PR: closed — Close the experiment") || !strings.Contains(view, "PR link: https://github.com/example/repo/pull/2") {
+	linkedTitle := ansi.SetHyperlink("https://github.com/example/repo/pull/2") + "Close the experiment" + ansi.ResetHyperlink()
+	if !strings.Contains(view, "[closed] - "+linkedTitle) || strings.Contains(view, "PR link:") {
 		t.Fatalf("closed status and title were not rendered: %q", view)
 	}
 }
