@@ -55,6 +55,26 @@ func worktreeMoveDestination(repo repository, item worktree, parent string) (str
 	return destination, nil
 }
 
+func createMoveDirectory(parent, name string) (string, error) {
+	if name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+		return "", fmt.Errorf("folder name must be a single directory name")
+	}
+	parent, err := canonicalPath(parent)
+	if err != nil {
+		return "", fmt.Errorf("resolve parent folder: %w", err)
+	}
+	destination := filepath.Join(parent, name)
+	if _, err := os.Lstat(destination); err == nil {
+		return "", fmt.Errorf("folder already exists: %s", destination)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("inspect new folder: %w", err)
+	}
+	if err := os.Mkdir(destination, 0o755); err != nil {
+		return "", fmt.Errorf("create folder: %w", err)
+	}
+	return canonicalPath(destination)
+}
+
 func worktreeMoveUnavailable(repo repository, item worktree) error {
 	if item.Missing {
 		return fmt.Errorf("cannot move a missing worktree")

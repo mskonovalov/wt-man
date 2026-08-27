@@ -18,12 +18,14 @@ type moveDirectoryChoice struct {
 }
 
 type moveBrowser struct {
-	directory  string
-	choices    []moveDirectoryChoice
-	cursor     int
-	offset     int
-	showHidden bool
-	err        error
+	directory        string
+	choices          []moveDirectoryChoice
+	cursor           int
+	offset           int
+	showHidden       bool
+	creatingFolder   bool
+	newDirectoryName string
+	err              error
 }
 
 type worktreeMoveMsg struct {
@@ -113,6 +115,9 @@ func (m model) beginMove() (tea.Model, tea.Cmd) {
 func (m model) updateMoveKey(key string) (tea.Model, tea.Cmd) {
 	switch m.screen {
 	case moveBrowserScreen:
+		if m.moveBrowser.creatingFolder {
+			return m.updateMoveFolderName(key)
+		}
 		switch key {
 		case "q":
 			return m, tea.Quit
@@ -148,6 +153,10 @@ func (m model) updateMoveKey(key string) (tea.Model, tea.Cmd) {
 		case ".":
 			m.moveBrowser.showHidden = !m.moveBrowser.showHidden
 			return m.openMoveDirectory(m.moveBrowser.directory)
+		case "n":
+			m.moveBrowser.creatingFolder = true
+			m.moveBrowser.newDirectoryName = ""
+			m.moveBrowser.err = nil
 		case "enter", "right", "l":
 			if len(m.moveBrowser.choices) == 0 {
 				return m, nil
@@ -205,6 +214,34 @@ func (m model) updateMoveKey(key string) (tea.Model, tea.Cmd) {
 			return m.returnFromMove()
 		}
 		return m, nil
+	}
+	return m, nil
+}
+
+func (m model) updateMoveFolderName(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc":
+		m.moveBrowser.creatingFolder = false
+		m.moveBrowser.newDirectoryName = ""
+		m.moveBrowser.err = nil
+	case "enter":
+		directory, err := createMoveDirectory(m.moveBrowser.directory, m.moveBrowser.newDirectoryName)
+		if err != nil {
+			m.moveBrowser.err = err
+			return m, nil
+		}
+		return m.openMoveDirectory(directory)
+	case "backspace", "ctrl+h":
+		name := []rune(m.moveBrowser.newDirectoryName)
+		if len(name) > 0 {
+			m.moveBrowser.newDirectoryName = string(name[:len(name)-1])
+		}
+		m.moveBrowser.err = nil
+	default:
+		if len([]rune(key)) == 1 {
+			m.moveBrowser.newDirectoryName += key
+			m.moveBrowser.err = nil
+		}
 	}
 	return m, nil
 }
@@ -300,6 +337,11 @@ func (m model) moveBrowserView() string {
 		output.WriteString(truncate("\x1b[31m"+m.moveBrowser.err.Error()+"\x1b[0m", m.width))
 		output.WriteByte('\n')
 	}
+	if m.moveBrowser.creatingFolder {
+		output.WriteString("New folder: " + m.moveBrowser.newDirectoryName + "█\n")
+		output.WriteString("\nType a name  enter create  esc cancel\n")
+		return output.String()
+	}
 	end := min(len(m.moveBrowser.choices), m.moveBrowser.offset+m.moveBrowserPageSize())
 	for index := m.moveBrowser.offset; index < end; index++ {
 		pointer := "  "
@@ -313,7 +355,7 @@ func (m model) moveBrowserView() string {
 	if m.moveBrowser.showHidden {
 		visibility = "hide hidden"
 	}
-	fmt.Fprintf(&output, "\n↑/↓ navigate  enter open/select  ← parent  . %s  ~ home  esc cancel\n", visibility)
+	fmt.Fprintf(&output, "\n↑/↓ navigate  enter open/select  n new folder  ← parent  . %s  ~ home  esc cancel\n", visibility)
 	return output.String()
 }
 

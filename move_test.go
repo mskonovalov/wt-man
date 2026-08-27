@@ -102,6 +102,25 @@ func TestWorktreeMoveDestinationRejectsUnsafeTargets(t *testing.T) {
 	}
 }
 
+func TestCreateMoveDirectory(t *testing.T) {
+	root := t.TempDir()
+	directory, err := createMoveDirectory(root, "new folder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(directory); err != nil || !info.IsDir() {
+		t.Fatalf("new folder was not created: %v", err)
+	}
+	if _, err := createMoveDirectory(root, "new folder"); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("existing folder returned %v", err)
+	}
+	for _, name := range []string{"", ".", "..", "nested/folder"} {
+		if _, err := createMoveDirectory(root, name); err == nil {
+			t.Fatalf("invalid folder name %q was accepted", name)
+		}
+	}
+}
+
 func TestLoadMoveBrowserShowsOnlyDirectories(t *testing.T) {
 	root := t.TempDir()
 	for _, name := range []string{"visible", ".hidden"} {
@@ -126,6 +145,36 @@ func TestLoadMoveBrowserShowsOnlyDirectories(t *testing.T) {
 	}
 	if labels := moveChoiceLabels(browser.choices); !strings.Contains(labels, ".hidden/") {
 		t.Fatalf("hidden directory was not shown: %s", labels)
+	}
+}
+
+func TestMoveBrowserCreatesAndEntersDirectory(t *testing.T) {
+	repo, item, root := createMoveTestWorktree(t)
+	m := newModel([]repository{{Name: repo.Name, MainPath: repo.MainPath, Worktrees: []worktree{item}}})
+	m.root = root
+	updated, _ := m.updateKey("M")
+	m = updated.(model)
+	updated, _ = m.updateKey("n")
+	m = updated.(model)
+	updated, _ = m.updateKey("esc")
+	m = updated.(model)
+	if m.moveBrowser.creatingFolder {
+		t.Fatal("folder prompt did not close")
+	}
+	updated, _ = m.updateKey("n")
+	m = updated.(model)
+	for _, key := range []string{"n", "e", "w"} {
+		updated, _ = m.updateKey(key)
+		m = updated.(model)
+	}
+	if !strings.Contains(m.moveBrowserView(), "New folder: new") {
+		t.Fatalf("folder prompt was not rendered: %q", m.moveBrowserView())
+	}
+	updated, _ = m.updateKey("enter")
+	m = updated.(model)
+	want, _ := canonicalPath(filepath.Join(root, "new"))
+	if m.moveBrowser.directory != want || m.moveBrowser.creatingFolder {
+		t.Fatalf("new folder was not entered: %#v", m.moveBrowser)
 	}
 }
 
