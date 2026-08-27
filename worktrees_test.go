@@ -14,6 +14,20 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
+type stubSessionProvider struct {
+	name     string
+	sessions []agentSession
+	err      error
+}
+
+func (provider stubSessionProvider) Name() string {
+	return provider.name
+}
+
+func (provider stubSessionProvider) Sessions(context.Context) ([]agentSession, error) {
+	return provider.sessions, provider.err
+}
+
 func TestParseWorktrees(t *testing.T) {
 	output := "worktree /tmp/repo\n" +
 		"HEAD abc123\n" +
@@ -832,8 +846,10 @@ func TestModelFiltersByUnarchivedSessions(t *testing.T) {
 	m := newModel([]repository{{
 		Name: "example",
 		Worktrees: []worktree{
-			{Path: "/tmp/open", Sessions: sessionCounts{Claude: 1, ClaudeKnown: true, CodexKnown: true}},
-			{Path: "/tmp/archived", Sessions: sessionCounts{ClaudeKnown: true, CodexKnown: true}},
+			{Path: "/tmp/open", Sessions: worktreeSessions{Providers: []worktreeSessionProvider{
+				{Name: "Claude", Known: true, Sessions: []agentSession{{ArchiveStatus: sessionArchiveUnarchived}}}, {Name: "Codex", Known: true},
+			}}},
+			{Path: "/tmp/archived", Sessions: worktreeSessions{Providers: []worktreeSessionProvider{{Name: "Claude", Known: true}, {Name: "Codex", Known: true}}}},
 			{Path: "/tmp/unknown"},
 		},
 	}})
@@ -857,6 +873,17 @@ func TestModelFiltersByUnarchivedSessions(t *testing.T) {
 	}
 }
 
+func TestReadSessionProvidersPreservesProviderResults(t *testing.T) {
+	expectedErr := errors.New("unavailable")
+	results := readSessionProviders(context.Background(), []sessionProvider{
+		stubSessionProvider{name: "First", sessions: []agentSession{{ID: "one"}}},
+		stubSessionProvider{name: "Second", err: expectedErr},
+	})
+	if len(results) != 2 || results[0].Name != "First" || results[0].Sessions[0].ID != "one" || results[0].Err != nil || results[1].Name != "Second" || !errors.Is(results[1].Err, expectedErr) {
+		t.Fatalf("unexpected provider results: %#v", results)
+	}
+}
+
 func TestReadClaudeSessionsFromFixture(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -872,16 +899,16 @@ func TestReadClaudeSessionsFromFixture(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(base, "local_test.json"), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sessions, known := readClaudeSessions()
+	sessions, err := (claudeSessionProvider{}).Sessions(context.Background())
 	cwd, _ = canonicalPath(cwd)
-	if detail, ok := sessions[cwd]["abc"]; !known || !ok || detail.Title != "Fix checkout" || detail.Model != "claude-opus" || detail.URL != "claude://resume?session=abc" || detail.UpdatedAt.UnixMilli() != 1770000300000 {
-		t.Fatalf("unexpected sessions: %#v, known=%v", sessions, known)
+	if err != nil || len(sessions) != 1 || sessions[0].ID != "abc" || sessions[0].WorkingDirectory != cwd || sessions[0].Title != "Fix checkout" || sessions[0].Model != "claude-opus" || sessions[0].URL != "claude://resume?session=abc" || sessions[0].UpdatedAt.UnixMilli() != 1770000300000 || sessions[0].ArchiveStatus != sessionArchiveUnarchived {
+		t.Fatalf("unexpected sessions: %#v, err=%v", sessions, err)
 	}
 	if err := os.WriteFile(filepath.Join(base, "local_broken.json"), []byte("{"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, known = readClaudeSessions()
-	if known {
+	_, err = (claudeSessionProvider{}).Sessions(context.Background())
+	if err == nil {
 		t.Fatal("malformed Claude session source was reported as known")
 	}
 	if err := os.Remove(filepath.Join(base, "local_broken.json")); err != nil {
@@ -890,8 +917,8 @@ func TestReadClaudeSessionsFromFixture(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(base, "local_incomplete.json"), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, known = readClaudeSessions()
-	if known {
+	_, err = (claudeSessionProvider{}).Sessions(context.Background())
+	if err == nil {
 		t.Fatal("structurally incomplete Claude session source was reported as known")
 	}
 }
@@ -916,10 +943,74 @@ func TestReadCodexSessionDetailsFromFixture(t *testing.T) {
 	if output, err := exec.Command("sqlite3", database, schema).CombinedOutput(); err != nil {
 		t.Fatalf("create Codex fixture: %v: %s", err, output)
 	}
-	sessions, known := readCodexSessions(context.Background())
+	sessions, err := (codexSessionProvider{}).Sessions(context.Background())
 	cwd, _ = canonicalPath(cwd)
-	if !known || len(sessions[cwd]) != 1 || sessions[cwd][0].Title != "Review worktrees" || sessions[cwd][0].Model != "gpt-5.6" || sessions[cwd][0].URL != "codex://threads/codex-session" || sessions[cwd][0].UpdatedAt.UnixMilli() != 1770000300000 {
-		t.Fatalf("unexpected sessions: %#v, known=%v", sessions, known)
+	if err != nil || len(sessions) != 2 || sessions[0].WorkingDirectory != cwd || sessions[0].Title != "Review worktrees" || sessions[0].Model != "gpt-5.6" || sessions[0].URL != "codex://threads/codex-session" || sessions[0].UpdatedAt.UnixMilli() != 1770000300000 || sessions[0].ArchiveStatus != sessionArchiveUnarchived || sessions[1].ArchiveStatus != sessionArchiveArchived {
+		t.Fatalf("unexpected sessions: %#v, err=%v", sessions, err)
+	}
+}
+
+func TestReadCursorSessionDetailsFromFixture(t *testing.T) {
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		t.Skip("sqlite3 is unavailable")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := filepath.Join(home, "worktree")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	databaseDirectory := filepath.Join(home, "Library", "Application Support", "Cursor", "User", "globalStorage")
+	if err := os.MkdirAll(databaseDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"allComposers":[` +
+		`{"composerId":"open","name":"Open task","createdAt":1770000000000,"lastUpdatedAt":1770000300000,"isArchived":false,"workspaceIdentifier":{"uri":{"fsPath":"` + cwd + `"}}},` +
+		`{"composerId":"archived","subtitle":"Archived task","createdAt":1770000000000,"isArchived":true,"workspaceIdentifier":{"uri":{"fsPath":"` + cwd + `"}}},` +
+		`{"composerId":"unknown","name":"Unknown task","createdAt":1770000000000,"workspaceIdentifier":{"uri":{"fsPath":"` + cwd + `"}}},` +
+		`{"composerId":"unmapped","name":"Unmapped task","isArchived":false,"workspaceIdentifier":{"id":"workspace-id"}}]}`
+	database := filepath.Join(databaseDirectory, "state.vscdb")
+	schema := "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);" +
+		"INSERT INTO ItemTable VALUES ('composer.composerHeaders', '" + strings.ReplaceAll(payload, "'", "''") + "');"
+	if output, err := exec.Command("sqlite3", database, schema).CombinedOutput(); err != nil {
+		t.Fatalf("create Cursor fixture: %v: %s", err, output)
+	}
+	sessions, err := (cursorSessionProvider{}).Sessions(context.Background())
+	cwd, _ = canonicalPath(cwd)
+	if err != nil || len(sessions) != 3 {
+		t.Fatalf("unexpected Cursor sessions: %#v, err=%v", sessions, err)
+	}
+	if sessions[0].ID != "open" || sessions[0].WorkingDirectory != cwd || sessions[0].Title != "Open task" || sessions[0].UpdatedAt.UnixMilli() != 1770000300000 || sessions[0].ArchiveStatus != sessionArchiveUnarchived || sessions[0].URL != "" {
+		t.Fatalf("unexpected open Cursor session: %#v", sessions[0])
+	}
+	if sessions[1].Title != "Archived task" || sessions[1].UpdatedAt.UnixMilli() != 1770000000000 || sessions[1].ArchiveStatus != sessionArchiveArchived {
+		t.Fatalf("unexpected archived Cursor session: %#v", sessions[1])
+	}
+	if sessions[2].ArchiveStatus != sessionArchiveUnknown {
+		t.Fatalf("unexpected unknown Cursor archive state: %#v", sessions[2])
+	}
+}
+
+func TestUnknownSessionArchiveStatusIsVisibleButNotFilterable(t *testing.T) {
+	item := worktree{Path: "/tmp/cursor", Sessions: worktreeSessions{Providers: []worktreeSessionProvider{{
+		Name: "Cursor", Known: true, Sessions: []agentSession{{Title: "Unknown Cursor task", ArchiveStatus: sessionArchiveUnknown}},
+	}}}}
+	if label := sessionLabel(item.Sessions); label != "Cu0? !" {
+		t.Fatalf("unexpected unknown archive label: %q", label)
+	}
+	if details := ansi.Strip(sessionDetailsView(item.Sessions, 100)); !strings.Contains(details, `Cursor: "Unknown Cursor task" · archive unknown`) {
+		t.Fatalf("unknown Cursor session was not shown: %q", details)
+	}
+	m := newModel([]repository{{Name: "example", Worktrees: []worktree{item}}})
+	updated, _ := m.updateKey("u")
+	m = updated.(model)
+	if len(m.visible) != 0 {
+		t.Fatalf("unknown session matched with-unarchived filter: %#v", m.visible)
+	}
+	updated, _ = m.updateKey("u")
+	m = updated.(model)
+	if len(m.visible) != 0 {
+		t.Fatalf("unknown session matched without-unarchived filter: %#v", m.visible)
 	}
 }
 
@@ -931,18 +1022,19 @@ func TestAssignSessionsUsesDeepestContainingWorktree(t *testing.T) {
 			{Path: "/tmp/repo/nested"},
 		},
 	}}
-	claude := map[string]map[string]sessionDetail{
-		"/tmp/repo/nested/subdirectory": {"session": {Title: "Claude task"}},
+	providers := []sessionProviderResult{
+		{Name: "Claude", Sessions: []agentSession{{WorkingDirectory: "/tmp/repo/nested/subdirectory", Title: "Claude task", ArchiveStatus: sessionArchiveUnarchived}}},
+		{Name: "Codex", Sessions: []agentSession{
+			{WorkingDirectory: "/tmp/repo/nested/another", Title: "Codex task", ArchiveStatus: sessionArchiveUnarchived},
+			{WorkingDirectory: "/tmp/repo/nested/another", Title: "Another task", ArchiveStatus: sessionArchiveUnarchived},
+		}},
 	}
-	codex := map[string][]sessionDetail{
-		"/tmp/repo/nested/another": {{Title: "Codex task"}, {Title: "Another task"}},
-	}
-	assignSessions(repositories, claude, codex, true, true)
-	if repositories[0].Worktrees[0].Sessions.Claude != 0 || repositories[0].Worktrees[0].Sessions.Codex != 0 {
+	assignSessions(repositories, providers)
+	if repositories[0].Worktrees[0].Sessions.unarchivedCount() != 0 {
 		t.Fatalf("outer worktree received nested sessions: %#v", repositories)
 	}
 	got := repositories[0].Worktrees[1].Sessions
-	if got.Claude != 1 || got.Codex != 2 || !got.ClaudeKnown || !got.CodexKnown || got.ClaudeSessions[0].Title != "Claude task" || got.CodexSessions[1].Title != "Another task" {
+	if got.unarchivedCount() != 3 || !got.archiveStatusKnown() || got.Providers[0].Sessions[0].Title != "Claude task" || got.Providers[1].Sessions[1].Title != "Another task" {
 		t.Fatalf("nested worktree did not receive sessions: %#v", got)
 	}
 }
@@ -963,7 +1055,10 @@ func TestLockedWorktreeIsRefusedAndExplained(t *testing.T) {
 }
 
 func TestReviewDoesNotRenderUnknownProviderAsZero(t *testing.T) {
-	item := worktree{Path: "/tmp/session", Sessions: sessionCounts{Claude: 2, ClaudeKnown: true}}
+	item := worktree{Path: "/tmp/session", Sessions: worktreeSessions{Providers: []worktreeSessionProvider{
+		{Name: "Claude", Known: true, Sessions: []agentSession{{ArchiveStatus: sessionArchiveUnarchived}, {ArchiveStatus: sessionArchiveUnarchived}}},
+		{Name: "Codex", Known: false},
+	}}}
 	m := newModel([]repository{{Name: "example", Worktrees: []worktree{item}}})
 	m.selected[item.Path] = true
 	view := m.reviewView()
@@ -975,17 +1070,16 @@ func TestReviewDoesNotRenderUnknownProviderAsZero(t *testing.T) {
 func TestBrowseShowsRecentSessionDetailsBelowSelectedWorktree(t *testing.T) {
 	item := worktree{
 		Path: "/tmp/session-details",
-		Sessions: sessionCounts{
-			Claude: 2, Codex: 2, ClaudeKnown: true, CodexKnown: true,
-			ClaudeSessions: []sessionDetail{
-				{Title: "Old Claude task", UpdatedAt: time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)},
-				{Title: "Newest Claude task", Model: "claude-opus", URL: "claude://resume?session=claude-session", UpdatedAt: time.Date(2026, 8, 26, 15, 0, 0, 0, time.UTC)},
-			},
-			CodexSessions: []sessionDetail{
-				{Title: "Middle Codex task", Model: "gpt-5.6", URL: "codex://threads/codex-session", UpdatedAt: time.Date(2026, 8, 25, 14, 0, 0, 0, time.UTC)},
-				{Title: "Another Codex task", UpdatedAt: time.Date(2026, 8, 24, 13, 0, 0, 0, time.UTC)},
-			},
-		},
+		Sessions: worktreeSessions{Providers: []worktreeSessionProvider{
+			{Name: "Claude", Known: true, Sessions: []agentSession{
+				{Title: "Old Claude task", UpdatedAt: time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC), ArchiveStatus: sessionArchiveUnarchived},
+				{Title: "Newest Claude task", Model: "claude-opus", URL: "claude://resume?session=claude-session", UpdatedAt: time.Date(2026, 8, 26, 15, 0, 0, 0, time.UTC), ArchiveStatus: sessionArchiveUnarchived},
+			}},
+			{Name: "Codex", Known: true, Sessions: []agentSession{
+				{Title: "Middle Codex task", Model: "gpt-5.6", URL: "codex://threads/codex-session", UpdatedAt: time.Date(2026, 8, 25, 14, 0, 0, 0, time.UTC), ArchiveStatus: sessionArchiveUnarchived},
+				{Title: "Another Codex task", UpdatedAt: time.Date(2026, 8, 24, 13, 0, 0, 0, time.UTC), ArchiveStatus: sessionArchiveUnarchived},
+			}},
+		}},
 	}
 	m := newModel([]repository{{Name: "example", Worktrees: []worktree{item}}})
 	m.width = 160
@@ -1013,10 +1107,10 @@ func TestBrowseDetailAreaHasFixedHeight(t *testing.T) {
 		{Path: "/tmp/no-sessions"},
 		{
 			Path: "/tmp/four-sessions",
-			Sessions: sessionCounts{
-				ClaudeSessions: []sessionDetail{{Title: "One"}, {Title: "Two"}},
-				CodexSessions:  []sessionDetail{{Title: "Three"}, {Title: "Four"}},
-			},
+			Sessions: worktreeSessions{Providers: []worktreeSessionProvider{
+				{Name: "Claude", Known: true, Sessions: []agentSession{{Title: "One", ArchiveStatus: sessionArchiveUnarchived}, {Title: "Two", ArchiveStatus: sessionArchiveUnarchived}}},
+				{Name: "Codex", Known: true, Sessions: []agentSession{{Title: "Three", ArchiveStatus: sessionArchiveUnarchived}, {Title: "Four", ArchiveStatus: sessionArchiveUnarchived}}},
+			}},
 		},
 	}
 	m := newModel([]repository{{Name: "example", Worktrees: items}})
@@ -1033,12 +1127,10 @@ func TestBrowseDetailAreaHasFixedHeight(t *testing.T) {
 }
 
 func TestSessionDetailsTruncateTitleBeforeMetadata(t *testing.T) {
-	sessions := sessionCounts{ClaudeSessions: []sessionDetail{{
-		Title:     strings.Repeat("Long session title ", 8),
-		Model:     "claude-opus",
-		URL:       "claude://resume?session=long-session",
-		UpdatedAt: time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC),
-	}}}
+	sessions := worktreeSessions{Providers: []worktreeSessionProvider{{Name: "Claude", Known: true, Sessions: []agentSession{{
+		Title: strings.Repeat("Long session title ", 8), Model: "claude-opus", URL: "claude://resume?session=long-session",
+		UpdatedAt: time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC), ArchiveStatus: sessionArchiveUnarchived,
+	}}}}}
 	lines := strings.Split(ansi.Strip(sessionDetailsView(sessions, 64)), "\n")
 	if len(lines) < 2 || !strings.Contains(lines[1], "…") || !strings.HasSuffix(lines[1], " · claude-opus · active 2026-08-27 12:00") {
 		t.Fatalf("session title was not truncated before its metadata: %q", lines)
@@ -1088,8 +1180,10 @@ func TestDiscoveryAddsRepositoriesBeforeScanCompletes(t *testing.T) {
 func TestSessionStatusAppliesToRepositoriesDiscoveredLater(t *testing.T) {
 	m := newDiscoveringModel("/tmp")
 	updated, _ := m.Update(sessionStatusMsg{
-		claude: map[string]map[string]sessionDetail{"/tmp/linked": {"session": {Title: "Claude task"}}},
-		codex:  map[string][]sessionDetail{}, claudeKnown: true, codexKnown: true,
+		providers: []sessionProviderResult{
+			{Name: "Claude", Sessions: []agentSession{{WorkingDirectory: "/tmp/linked", Title: "Claude task", ArchiveStatus: sessionArchiveUnarchived}}},
+			{Name: "Codex"},
+		},
 	})
 	m = updated.(model)
 	m.discoveryRoots = []string{"/tmp/repo"}
@@ -1100,7 +1194,7 @@ func TestSessionStatusAppliesToRepositoriesDiscoveredLater(t *testing.T) {
 		generation: m.generation, commonDirectory: "/tmp/repo/.git", repository: repo, found: true,
 	})
 	m = updated.(model)
-	if got := m.repositories[0].Worktrees[0].Sessions; got.Claude != 1 || !got.ClaudeKnown || !got.CodexKnown || got.ClaudeSessions[0].Title != "Claude task" {
+	if got := m.repositories[0].Worktrees[0].Sessions; got.unarchivedCount() != 1 || !got.archiveStatusKnown() || got.Providers[0].Sessions[0].Title != "Claude task" {
 		t.Fatalf("session status was not applied to a later repository: %#v", got)
 	}
 }
