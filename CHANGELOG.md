@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.0 (2026-08-27)
+
+## What's Changed
+* docs: fix system-wide install instructions by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/21
+* Show pull request titles in worktree details by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/22
+* Highlight the active worktree row by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/24
+* fix: keep worktree detail height stable by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/25
+
+
+**Full Changelog**: https://github.com/mskonovalov/wt-man/compare/v1.1.0...v1.2.0
+
 ## 1.1.0 (2026-08-26)
 
 ## What's Changed
