@@ -50,7 +50,15 @@ func (cursorSessionProvider) Sessions(ctx context.Context) ([]agentSession, erro
 		return nil, fmt.Errorf("read Cursor composer headers: got %d rows", len(rows))
 	}
 	var stored struct {
-		AllComposers []struct {
+		AllComposers []json.RawMessage `json:"allComposers"`
+	}
+	if err := json.Unmarshal([]byte(rows[0].Value), &stored); err != nil {
+		return nil, err
+	}
+	var sessions []agentSession
+	var sourceErr error
+	for _, rawComposer := range stored.AllComposers {
+		var composer struct {
 			ComposerID          string `json:"composerId"`
 			Name                string `json:"name"`
 			Subtitle            string `json:"subtitle"`
@@ -62,14 +70,11 @@ func (cursorSessionProvider) Sessions(ctx context.Context) ([]agentSession, erro
 					FSPath string `json:"fsPath"`
 				} `json:"uri"`
 			} `json:"workspaceIdentifier"`
-		} `json:"allComposers"`
-	}
-	if err := json.Unmarshal([]byte(rows[0].Value), &stored); err != nil {
-		return nil, err
-	}
-	var sessions []agentSession
-	var sourceErr error
-	for _, composer := range stored.AllComposers {
+		}
+		if err := json.Unmarshal(rawComposer, &composer); err != nil {
+			sourceErr = errors.Join(sourceErr, fmt.Errorf("decode Cursor session: %w", err))
+			continue
+		}
 		if composer.ComposerID == "" {
 			sourceErr = errors.Join(sourceErr, errors.New("Cursor session has no composer ID"))
 			continue

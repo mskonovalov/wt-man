@@ -961,11 +961,13 @@ func TestReadCursorSessionDetailsFromFixture(t *testing.T) {
 	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
 	cwd := filepath.Join(home, "worktree")
 	if err := os.MkdirAll(cwd, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	databaseDirectory := filepath.Join(home, "Library", "Application Support", "Cursor", "User", "globalStorage")
+	database := cursorDatabasePath(home)
+	databaseDirectory := filepath.Dir(database)
 	if err := os.MkdirAll(databaseDirectory, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -973,8 +975,8 @@ func TestReadCursorSessionDetailsFromFixture(t *testing.T) {
 		`{"composerId":"open","name":"Open task","createdAt":1770000000000,"lastUpdatedAt":1770000300000,"isArchived":false,"workspaceIdentifier":{"uri":{"fsPath":"` + cwd + `"}}},` +
 		`{"composerId":"archived","subtitle":"Archived task","createdAt":1770000000000,"isArchived":true,"workspaceIdentifier":{"uri":{"fsPath":"` + cwd + `"}}},` +
 		`{"composerId":"unknown","name":"Unknown task","createdAt":1770000000000,"workspaceIdentifier":{"uri":{"fsPath":"` + cwd + `"}}},` +
+		`{"composerId":"malformed","createdAt":"not-a-number","workspaceIdentifier":{"uri":{"fsPath":"` + cwd + `"}}},` +
 		`{"composerId":"unmapped","name":"Unmapped task","isArchived":false,"workspaceIdentifier":{"id":"workspace-id"}}]}`
-	database := filepath.Join(databaseDirectory, "state.vscdb")
 	schema := "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);" +
 		"INSERT INTO ItemTable VALUES ('composer.composerHeaders', '" + strings.ReplaceAll(payload, "'", "''") + "');"
 	if output, err := exec.Command("sqlite3", database, schema).CombinedOutput(); err != nil {
