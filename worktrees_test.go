@@ -1003,6 +1003,13 @@ func TestReadCursorSessionDetailsFromFixture(t *testing.T) {
 	if err != nil || len(sessions) != 0 {
 		t.Fatalf("empty Cursor history was not reported as known: %#v, err=%v", sessions, err)
 	}
+	if output, err := exec.Command("sqlite3", database, "INSERT INTO ItemTable VALUES ('composer.composerHeaders', '{}');").CombinedOutput(); err != nil {
+		t.Fatalf("write malformed Cursor fixture headers: %v: %s", err, output)
+	}
+	sessions, err = (cursorSessionProvider{}).Sessions(context.Background())
+	if err == nil || len(sessions) != 0 {
+		t.Fatalf("malformed Cursor history was reported as known: %#v, err=%v", sessions, err)
+	}
 }
 
 func TestUnknownSessionArchiveStatusIsVisibleButNotFilterable(t *testing.T) {

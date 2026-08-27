@@ -50,14 +50,17 @@ func (cursorSessionProvider) Sessions(ctx context.Context) ([]agentSession, erro
 		return nil, fmt.Errorf("read Cursor composer headers: got %d rows", len(rows))
 	}
 	var stored struct {
-		AllComposers []json.RawMessage `json:"allComposers"`
+		AllComposers *[]json.RawMessage `json:"allComposers"`
 	}
 	if err := json.Unmarshal([]byte(rows[0].Value), &stored); err != nil {
 		return nil, err
 	}
+	if stored.AllComposers == nil {
+		return nil, errors.New("Cursor composer headers have no session list")
+	}
 	var sessions []agentSession
 	var sourceErr error
-	for _, rawComposer := range stored.AllComposers {
+	for _, rawComposer := range *stored.AllComposers {
 		var composer struct {
 			ComposerID          string `json:"composerId"`
 			Name                string `json:"name"`
