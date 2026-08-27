@@ -982,7 +982,7 @@ func TestReadCursorSessionDetailsFromFixture(t *testing.T) {
 	}
 	sessions, err := (cursorSessionProvider{}).Sessions(context.Background())
 	cwd, _ = canonicalPath(cwd)
-	if err != nil || len(sessions) != 3 {
+	if err == nil || len(sessions) != 3 {
 		t.Fatalf("unexpected Cursor sessions: %#v, err=%v", sessions, err)
 	}
 	if sessions[0].ID != "open" || sessions[0].WorkingDirectory != cwd || sessions[0].Title != "Open task" || sessions[0].UpdatedAt.UnixMilli() != 1770000300000 || sessions[0].ArchiveStatus != sessionArchiveUnarchived || sessions[0].URL != "" {
@@ -993,6 +993,13 @@ func TestReadCursorSessionDetailsFromFixture(t *testing.T) {
 	}
 	if sessions[2].ArchiveStatus != sessionArchiveUnknown {
 		t.Fatalf("unexpected unknown Cursor archive state: %#v", sessions[2])
+	}
+	if output, err := exec.Command("sqlite3", database, "DELETE FROM ItemTable WHERE key = 'composer.composerHeaders';").CombinedOutput(); err != nil {
+		t.Fatalf("remove Cursor fixture headers: %v: %s", err, output)
+	}
+	sessions, err = (cursorSessionProvider{}).Sessions(context.Background())
+	if err != nil || len(sessions) != 0 {
+		t.Fatalf("empty Cursor history was not reported as known: %#v, err=%v", sessions, err)
 	}
 }
 

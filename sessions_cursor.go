@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 )
 
 type cursorSessionProvider struct{}
@@ -22,7 +25,7 @@ func (cursorSessionProvider) Sessions(ctx context.Context) ([]agentSession, erro
 	if err != nil {
 		return nil, err
 	}
-	database := filepath.Join(home, "Library", "Application Support", "Cursor", "User", "globalStorage", "state.vscdb")
+	database := cursorDatabasePath(home)
 	if _, err := os.Stat(database); err != nil {
 		return nil, err
 	}
@@ -34,11 +37,17 @@ func (cursorSessionProvider) Sessions(ctx context.Context) ([]agentSession, erro
 	var rows []struct {
 		Value string `json:"value"`
 	}
+	if len(output) == 0 {
+		return nil, nil
+	}
 	if err := json.Unmarshal(output, &rows); err != nil {
 		return nil, err
 	}
-	if len(rows) != 1 {
-		return nil, os.ErrNotExist
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	if len(rows) > 1 {
+		return nil, fmt.Errorf("read Cursor composer headers: got %d rows", len(rows))
 	}
 	var stored struct {
 		AllComposers []struct {
@@ -59,12 +68,19 @@ func (cursorSessionProvider) Sessions(ctx context.Context) ([]agentSession, erro
 		return nil, err
 	}
 	var sessions []agentSession
+	var sourceErr error
 	for _, composer := range stored.AllComposers {
-		if composer.ComposerID == "" || composer.WorkspaceIdentifier.URI == nil || composer.WorkspaceIdentifier.URI.FSPath == "" {
+		if composer.ComposerID == "" {
+			sourceErr = errors.Join(sourceErr, errors.New("Cursor session has no composer ID"))
+			continue
+		}
+		if composer.WorkspaceIdentifier.URI == nil || composer.WorkspaceIdentifier.URI.FSPath == "" {
+			sourceErr = errors.Join(sourceErr, fmt.Errorf("Cursor session %s has no workspace path", composer.ComposerID))
 			continue
 		}
 		cwd, err := canonicalPath(composer.WorkspaceIdentifier.URI.FSPath)
 		if err != nil {
+			sourceErr = errors.Join(sourceErr, fmt.Errorf("resolve Cursor session directory: %w", err))
 			continue
 		}
 		archiveStatus := sessionArchiveUnknown
@@ -87,5 +103,16 @@ func (cursorSessionProvider) Sessions(ctx context.Context) ([]agentSession, erro
 			UpdatedAt: sessionTime(updatedAt), ArchiveStatus: archiveStatus,
 		})
 	}
-	return sessions, nil
+	return sessions, sourceErr
+}
+
+func cursorDatabasePath(home string) string {
+	if runtime.GOOS == "linux" {
+		configHome := os.Getenv("XDG_CONFIG_HOME")
+		if configHome == "" {
+			configHome = filepath.Join(home, ".config")
+		}
+		return filepath.Join(configHome, "Cursor", "User", "globalStorage", "state.vscdb")
+	}
+	return filepath.Join(home, "Library", "Application Support", "Cursor", "User", "globalStorage", "state.vscdb")
 }
