@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.0 (2026-08-27)
+
+## What's Changed
+* feat: show emphasized pull request links by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/26
+* feat: link Claude and Codex sessions by @mskonovalov in https://github.com/mskonovalov/wt-man/pull/27
+
+
+**Full Changelog**: https://github.com/mskonovalov/wt-man/compare/v1.2.0...v1.3.0
+
 ## 1.2.0 (2026-08-27)
 
 ## What's Changed
