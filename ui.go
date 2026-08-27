@@ -791,7 +791,7 @@ func (m model) browseView() string {
 		}
 		output.WriteString(truncate(branchDetails, m.width))
 		output.WriteByte('\n')
-		pullRequestDetails := "[" + pullRequestLabel(item) + "]"
+		pullRequestDetails := "PR: [" + pullRequestLabel(item) + "]"
 		if item.PullRequestTitle != "" {
 			pullRequestTitle := item.PullRequestTitle
 			if item.PullRequestNumber > 0 {

@@ -645,11 +645,11 @@ func TestGitHubMergeStatusUpdatesRows(t *testing.T) {
 	m.cursor = 1
 	view := m.browseView()
 	linkedTitle := ansi.SetHyperlink("https://github.com/example/repo/pull/2") + ansi.Style{}.Underline(true).Styled("#2 Close the experiment") + ansi.ResetHyperlink()
-	if !strings.Contains(view, "[closed] - "+linkedTitle) || strings.Contains(view, "PR link:") {
+	if !strings.Contains(view, "PR: [closed] - "+linkedTitle) || strings.Contains(view, "PR link:") {
 		t.Fatalf("closed status and title were not rendered: %q", view)
 	}
 	m.width = 28
-	if narrowView := ansi.Strip(m.browseView()); !strings.Contains(narrowView, "[closed] - #2 Close the exp…") {
+	if narrowView := ansi.Strip(m.browseView()); !strings.Contains(narrowView, "PR: [closed] - #2 Close the…") {
 		t.Fatalf("PR title did not fit the available terminal width: %q", narrowView)
 	}
 }
