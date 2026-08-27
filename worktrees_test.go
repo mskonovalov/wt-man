@@ -1032,6 +1032,22 @@ func TestBrowseDetailAreaHasFixedHeight(t *testing.T) {
 	}
 }
 
+func TestSessionDetailsTruncateTitleBeforeMetadata(t *testing.T) {
+	sessions := sessionCounts{ClaudeSessions: []sessionDetail{{
+		Title:     strings.Repeat("Long session title ", 8),
+		Model:     "claude-opus",
+		URL:       "claude://resume?session=long-session",
+		UpdatedAt: time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC),
+	}}}
+	lines := strings.Split(ansi.Strip(sessionDetailsView(sessions, 64)), "\n")
+	if len(lines) < 2 || !strings.Contains(lines[1], "…") || !strings.HasSuffix(lines[1], " · claude-opus · active 2026-08-27 12:00") {
+		t.Fatalf("session title was not truncated before its metadata: %q", lines)
+	}
+	if ansi.StringWidth(lines[1]) > 64 {
+		t.Fatalf("session detail width %d exceeds terminal width: %q", ansi.StringWidth(lines[1]), lines[1])
+	}
+}
+
 func TestBrowseHeaderIsBoundedToTerminalWidth(t *testing.T) {
 	m := newModel([]repository{{Name: strings.Repeat("repository", 20), Worktrees: []worktree{{Path: "/tmp/one"}}}})
 	m.width = 40
