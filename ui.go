@@ -292,11 +292,15 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			item.PullRequestKnown = true
 			item.PullRequestStatus = pullRequestUnmatched
 			item.PullRequestTitle = ""
+			item.PullRequestURL = ""
+			item.PullRequestNumber = 0
 		}
 		for current, pullRequest := range message.pullRequests {
 			item := &m.repositories[current.repository].Worktrees[current.worktree]
 			item.PullRequestStatus = pullRequest.Status
 			item.PullRequestTitle = pullRequest.Title
+			item.PullRequestURL = pullRequest.URL
+			item.PullRequestNumber = pullRequest.Number
 		}
 		if m.pullRequestMode != allPullRequestStatuses {
 			m.applyFilter()
@@ -787,11 +791,18 @@ func (m model) browseView() string {
 		}
 		output.WriteString(truncate(branchDetails, m.width))
 		output.WriteByte('\n')
-		pullRequestDetails := "PR: " + pullRequestLabel(item)
+		pullRequestDetails := "PR: [" + pullRequestLabel(item) + "]"
 		if item.PullRequestTitle != "" {
-			pullRequestDetails += " — " + item.PullRequestTitle
+			pullRequestTitle := item.PullRequestTitle
+			if item.PullRequestNumber > 0 {
+				pullRequestTitle = fmt.Sprintf("#%d %s", item.PullRequestNumber, pullRequestTitle)
+			}
+			if item.PullRequestURL != "" {
+				pullRequestTitle = ansi.SetHyperlink(item.PullRequestURL) + ansi.Style{}.Underline(true).Styled(pullRequestTitle) + ansi.ResetHyperlink()
+			}
+			pullRequestDetails += " - " + pullRequestTitle
 		}
-		output.WriteString(truncate(pullRequestDetails, m.width))
+		output.WriteString(ansi.Truncate(pullRequestDetails, m.width, "…"))
 		output.WriteByte('\n')
 		sessionDetails := sessionDetailsView(item.Sessions, m.width)
 		output.WriteString(sessionDetails)

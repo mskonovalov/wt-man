@@ -55,6 +55,8 @@ type worktree struct {
 	Broken            bool
 	PullRequestStatus pullRequestStatus
 	PullRequestTitle  string
+	PullRequestURL    string
+	PullRequestNumber int
 	PullRequestKnown  bool
 	CreatedAt         time.Time
 	ModifiedAt        time.Time
@@ -71,6 +73,8 @@ type associatedPullRequest struct {
 	MergedAt    *time.Time `json:"mergedAt"`
 	State       string     `json:"state"`
 	Title       string     `json:"title"`
+	URL         string     `json:"url"`
+	Number      int        `json:"number"`
 	BaseRefName string     `json:"baseRefName"`
 	HeadRefName string     `json:"headRefName"`
 	HeadRefOID  string     `json:"headRefOid"`
@@ -79,6 +83,8 @@ type associatedPullRequest struct {
 type pullRequestMatch struct {
 	Status pullRequestStatus
 	Title  string
+	URL    string
+	Number int
 }
 
 type pullRequestStatus int
@@ -312,11 +318,11 @@ func githubPullRequestRows(ctx context.Context, repositories []repository) (bool
 			}
 			commitAlias := fmt.Sprintf("c%d", worktreeIndex)
 			current.commitRows[commitAlias] = row{repository: repositoryIndex, worktree: worktreeIndex}
-			fmt.Fprintf(&repositoryFields, "%s: object(oid:%q) { ... on Commit { associatedPullRequests(first:10) { nodes { mergedAt state title baseRefName headRefName headRefOid } } } }", commitAlias, item.Head)
+			fmt.Fprintf(&repositoryFields, "%s: object(oid:%q) { ... on Commit { associatedPullRequests(first:10) { nodes { mergedAt state title url number baseRefName headRefName headRefOid } } } }", commitAlias, item.Head)
 			if current.base != "" {
 				closedAlias := fmt.Sprintf("p%d", worktreeIndex)
 				current.closedRows[closedAlias] = row{repository: repositoryIndex, worktree: worktreeIndex}
-				fmt.Fprintf(&repositoryFields, "%s: pullRequests(first:10, states:CLOSED, headRefName:%q, baseRefName:%q) { nodes { mergedAt state title baseRefName headRefName headRefOid } }", closedAlias, item.Branch, current.base)
+				fmt.Fprintf(&repositoryFields, "%s: pullRequests(first:10, states:CLOSED, headRefName:%q, baseRefName:%q) { nodes { mergedAt state title url number baseRefName headRefName headRefOid } }", closedAlias, item.Branch, current.base)
 			}
 		}
 		if len(current.commitRows) > 0 {
@@ -361,7 +367,7 @@ func githubPullRequestRows(ctx context.Context, repositories []repository) (bool
 			item := repositories[current.repository].Worktrees[current.worktree]
 			for _, pullRequest := range commit.AssociatedPullRequests.Nodes {
 				if candidate := matchingPullRequestStatus(pullRequest, item, repositoryQuery.base); candidate > pullRequests[current].Status {
-					pullRequests[current] = pullRequestMatch{Status: candidate, Title: pullRequest.Title}
+					pullRequests[current] = pullRequestMatch{Status: candidate, Title: pullRequest.Title, URL: pullRequest.URL, Number: pullRequest.Number}
 				}
 			}
 		}
@@ -375,7 +381,7 @@ func githubPullRequestRows(ctx context.Context, repositories []repository) (bool
 			item := repositories[current.repository].Worktrees[current.worktree]
 			for _, pullRequest := range closedPullRequests.Nodes {
 				if candidate := matchingClosedPullRequestStatus(pullRequest, item, repositoryQuery.base); candidate > pullRequests[current].Status {
-					pullRequests[current] = pullRequestMatch{Status: candidate, Title: pullRequest.Title}
+					pullRequests[current] = pullRequestMatch{Status: candidate, Title: pullRequest.Title, URL: pullRequest.URL, Number: pullRequest.Number}
 				}
 			}
 		}
