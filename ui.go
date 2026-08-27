@@ -855,14 +855,18 @@ func sessionDetailsView(sessions sessionCounts, width int) string {
 		if title == "" {
 			title = "Untitled session"
 		}
-		line := fmt.Sprintf("  %s: %q", session.provider, title)
+		sessionTitle := fmt.Sprintf("%q", title)
+		if session.detail.URL != "" {
+			sessionTitle = ansi.SetHyperlink(session.detail.URL) + ansi.Style{}.Underline(true).Styled(sessionTitle) + ansi.ResetHyperlink()
+		}
+		line := fmt.Sprintf("  %s: %s", session.provider, sessionTitle)
 		if model := cleanSessionText(session.detail.Model); model != "" {
 			line += " · " + model
 		}
 		if !session.detail.UpdatedAt.IsZero() {
 			line += " · active " + session.detail.UpdatedAt.Format("2006-01-02 15:04")
 		}
-		output.WriteString(truncate(line, width))
+		output.WriteString(ansi.Truncate(line, width, "…"))
 		output.WriteByte('\n')
 	}
 	if len(details) > 3 {
