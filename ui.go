@@ -480,6 +480,9 @@ func (m *model) appendDiscoveredRepository(repo repository) {
 		m.repositoryWidth = width
 	}
 	for worktreeIndex, item := range repo.Worktrees {
+		if len(repo.Worktrees[worktreeIndex].Sessions.Providers) == 0 {
+			repo.Worktrees[worktreeIndex].Sessions.Providers = unknownSessionProviders(sessionProviders)
+		}
 		branch := item.Branch
 		if branch == "" {
 			branch = "detached"

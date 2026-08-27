@@ -937,7 +937,12 @@ func TestReadCodexSessionDetailsFromFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	database := filepath.Join(codexHome, "sqlite", "state_5.sqlite")
+	loopPath := filepath.Join(codexHome, "loop")
+	if err := os.Symlink(loopPath, loopPath); err != nil {
+		t.Fatal(err)
+	}
 	schema := "CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, model TEXT, updated_at INTEGER, updated_at_ms INTEGER, archived INTEGER);" +
+		"INSERT INTO threads VALUES ('broken-session', '" + loopPath + "', 'Broken task', 'gpt-5.6', 1770000000, 1770000300000, 0);" +
 		"INSERT INTO threads VALUES ('codex-session', '" + cwd + "', 'Review worktrees', 'gpt-5.6', 1770000000, 1770000300000, 0);" +
 		"INSERT INTO threads VALUES ('archived-session', '" + cwd + "', 'Archived task', 'gpt-5.6', 1770000000, 1770000300000, 1);"
 	if output, err := exec.Command("sqlite3", database, schema).CombinedOutput(); err != nil {
@@ -945,7 +950,7 @@ func TestReadCodexSessionDetailsFromFixture(t *testing.T) {
 	}
 	sessions, err := (codexSessionProvider{}).Sessions(context.Background())
 	cwd, _ = canonicalPath(cwd)
-	if err != nil || len(sessions) != 2 || sessions[0].WorkingDirectory != cwd || sessions[0].Title != "Review worktrees" || sessions[0].Model != "gpt-5.6" || sessions[0].URL != "codex://threads/codex-session" || sessions[0].UpdatedAt.UnixMilli() != 1770000300000 || sessions[0].ArchiveStatus != sessionArchiveUnarchived || sessions[1].ArchiveStatus != sessionArchiveArchived {
+	if err == nil || len(sessions) != 2 || sessions[0].WorkingDirectory != cwd || sessions[0].Title != "Review worktrees" || sessions[0].Model != "gpt-5.6" || sessions[0].URL != "codex://threads/codex-session" || sessions[0].UpdatedAt.UnixMilli() != 1770000300000 || sessions[0].ArchiveStatus != sessionArchiveUnarchived || sessions[1].ArchiveStatus != sessionArchiveArchived {
 		t.Fatalf("unexpected sessions: %#v, err=%v", sessions, err)
 	}
 }
@@ -1174,6 +1179,9 @@ func TestDiscoveryAddsRepositoriesBeforeScanCompletes(t *testing.T) {
 	m = updated.(model)
 	if command == nil || !m.discoveryPending || len(m.visible) != 1 || m.item(m.visible[0]).Path != "/tmp/one-linked" {
 		t.Fatalf("repository was not shown during discovery: %#v", m)
+	}
+	if label := sessionLabel(m.item(m.visible[0]).Sessions); label != "C? X? !" {
+		t.Fatalf("pending session providers were not shown: %q", label)
 	}
 }
 
