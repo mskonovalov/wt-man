@@ -292,11 +292,13 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			item.PullRequestKnown = true
 			item.PullRequestStatus = pullRequestUnmatched
 			item.PullRequestTitle = ""
+			item.PullRequestURL = ""
 		}
 		for current, pullRequest := range message.pullRequests {
 			item := &m.repositories[current.repository].Worktrees[current.worktree]
 			item.PullRequestStatus = pullRequest.Status
 			item.PullRequestTitle = pullRequest.Title
+			item.PullRequestURL = pullRequest.URL
 		}
 		if m.pullRequestMode != allPullRequestStatuses {
 			m.applyFilter()
@@ -520,10 +522,10 @@ func (m model) finishDiscovery() (tea.Model, tea.Cmd) {
 }
 
 func (m model) pageSize() int {
-	if m.height < 13 {
+	if m.height < 14 {
 		return 1
 	}
-	size := m.height - 13
+	size := m.height - 14
 	if len(m.modificationQueue) > 0 {
 		size--
 	}
@@ -792,6 +794,12 @@ func (m model) browseView() string {
 			pullRequestDetails += " — " + item.PullRequestTitle
 		}
 		output.WriteString(truncate(pullRequestDetails, m.width))
+		output.WriteByte('\n')
+		pullRequestURL := item.PullRequestURL
+		if pullRequestURL == "" {
+			pullRequestURL = "n/a"
+		}
+		output.WriteString(truncate("PR link: "+pullRequestURL, m.width))
 		output.WriteByte('\n')
 		sessionDetails := sessionDetailsView(item.Sessions, m.width)
 		output.WriteString(sessionDetails)

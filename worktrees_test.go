@@ -622,9 +622,9 @@ func TestGitHubMergeStatusUpdatesRows(t *testing.T) {
 		generation:    m.generation,
 		authenticated: true,
 		pullRequests: map[row]pullRequestMatch{
-			{repository: 0, worktree: 0}: {Status: pullRequestMerged, Title: "Merge the feature"},
-			{repository: 0, worktree: 1}: {Status: pullRequestClosed, Title: "Close the experiment"},
-			{repository: 0, worktree: 2}: {Status: pullRequestOpen, Title: "Try the feature"},
+			{repository: 0, worktree: 0}: {Status: pullRequestMerged, Title: "Merge the feature", URL: "https://github.com/example/repo/pull/1"},
+			{repository: 0, worktree: 1}: {Status: pullRequestClosed, Title: "Close the experiment", URL: "https://github.com/example/repo/pull/2"},
+			{repository: 0, worktree: 2}: {Status: pullRequestOpen, Title: "Try the feature", URL: "https://github.com/example/repo/pull/3"},
 		},
 	})
 	m = updated.(model)
@@ -638,12 +638,12 @@ func TestGitHubMergeStatusUpdatesRows(t *testing.T) {
 	if !merged.PullRequestKnown || merged.PullRequestStatus != pullRequestMerged {
 		t.Fatalf("GitHub merged PR status was not applied: %#v", merged)
 	}
-	if closed.PullRequestStatus != pullRequestClosed || open.PullRequestStatus != pullRequestOpen || !notApplicable.PullRequestKnown || notApplicable.PullRequestStatus != pullRequestUnmatched {
+	if closed.PullRequestStatus != pullRequestClosed || closed.PullRequestURL != "https://github.com/example/repo/pull/2" || open.PullRequestStatus != pullRequestOpen || !notApplicable.PullRequestKnown || notApplicable.PullRequestStatus != pullRequestUnmatched {
 		t.Fatalf("GitHub PR statuses were not applied: merged=%#v closed=%#v open=%#v n/a=%#v", merged, closed, open, notApplicable)
 	}
 	m.cursor = 1
 	view := m.browseView()
-	if !strings.Contains(view, "closed") || !strings.Contains(view, "PR: closed — Close the experiment") {
+	if !strings.Contains(view, "closed") || !strings.Contains(view, "PR: closed — Close the experiment") || !strings.Contains(view, "PR link: https://github.com/example/repo/pull/2") {
 		t.Fatalf("closed status and title were not rendered: %q", view)
 	}
 }
