@@ -54,6 +54,7 @@ Keys:
 - /: filter by repository, branch, or path
 - u: cycle between all, with unarchived sessions, and without unarchived sessions
 - p: cycle between all, closed, merged, open, and n/a PR statuses
+- M: move the highlighted worktree with the directory browser
 - r: refresh the selected worktree's modified date
 - R: refresh all modified dates
 - Enter: review selected worktrees
@@ -65,8 +66,10 @@ Deletion uses `git worktree remove --force`. Locked worktrees are identified in 
 For an existing worktree, deletion removes both its directory and Git's worktree record. `missing (Git record only)` means the directory no longer exists but Git still has a stale record; deleting it removes only the record. `broken` means Git reports a prunable record while the directory still exists, usually because its `.git` link disappeared. Deleting a broken worktree explicitly removes the leftover directory before removing its Git record.
 Optional branch cleanup uses Git's safe `git branch -d` check, so an unmerged local branch is kept even after its worktree has been removed.
 
+Press `M` to move the highlighted worktree without typing a path. The compact directory browser starts at the scan root, lists directories only, and keeps the worktree's existing folder name. Use Up/Down or j/k to choose an entry, Enter to open a directory or select `Move here`, Left or Backspace to visit the parent, `.` to show or hide dot-directories, and `~` to jump home. A confirmation screen shows the exact source and destination before running `git worktree move`. Missing, broken, locked, and main worktrees cannot be moved; worktrees containing submodules are rejected by Git. Uncommitted and untracked files move with the worktree. If Claude or Codex has unarchived sessions at the old path, the confirmation screen warns that those sessions still reference it.
+
 On macOS, the created column uses the worktree directory's filesystem birth time. It displays `unknown` on platforms where a reliable creation timestamp is unavailable. The modified column is the newest filesystem modification time anywhere under the worktree; it is scanned in the background and does not follow symbolic links. Results are cached for 24 hours in the operating system's user cache directory.
-Date scans process one worktree at a time and show progress above the list. Deletion pauses further scans, removes one selected worktree at a time, and shows the current path and batch progress.
+Date scans process one worktree at a time and show progress above the list. Deletion and movement wait for the active scan to finish before changing filesystem paths; deletion then removes one selected worktree at a time and shows the current path and batch progress.
 Repository and branch columns expand to show their full values. The path column uses the remaining terminal width and is hidden when space is limited; on narrower terminals, the full branch moves onto a second line. The selected worktree's full details remain below the list.
 
 The PR column shows the matching GitHub pull request as `open`, `merged`, `closed`, or `n/a`, and the selected worktree details include the matching PR title. A closed PR must match the worktree branch, base branch, and exact head commit. Open and merged PRs use GitHub's commit association, including squash merges, deleted remote branches, and earlier commits contained in a later PR head.
