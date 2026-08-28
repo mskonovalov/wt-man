@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,6 +45,9 @@ func TestMoveWorktreePreservesLocalFiles(t *testing.T) {
 	if result.Err != nil {
 		t.Fatal(result.Err)
 	}
+	if !result.Moved {
+		t.Fatal("successful move was not recorded")
+	}
 	wantDestination := filepath.Join(destinationParent, filepath.Base(item.Path))
 	wantDestination, _ = canonicalPath(wantDestination)
 	if result.Destination != wantDestination {
@@ -62,6 +66,19 @@ func TestMoveWorktreePreservesLocalFiles(t *testing.T) {
 	}
 	if strings.Contains(output, item.Path) || !strings.Contains(output, wantDestination) {
 		t.Fatalf("Git worktree record was not updated: %s", output)
+	}
+}
+
+func TestApplyMoveResultKeepsCompletedMoveWhenVerificationFails(t *testing.T) {
+	repo, item, root := createMoveTestWorktree(t)
+	m := newModel([]repository{{Name: repo.Name, MainPath: repo.MainPath, Worktrees: []worktree{item}}})
+	m.moveRow = m.rows[0]
+	destination := filepath.Join(root, "destination", filepath.Base(item.Path))
+	m = m.applyMoveResult(worktreeMoveMsg{row: m.moveRow, result: worktreeMoveResult{
+		Source: item.Path, Destination: destination, Moved: true, Err: errors.New("old path still exists"),
+	}})
+	if m.item(m.rows[0]).Path != destination || !strings.Contains(m.moveResultView(), "Move incomplete") {
+		t.Fatalf("completed move was not retained: %#v", m.moveResult)
 	}
 }
 

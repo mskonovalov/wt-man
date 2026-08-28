@@ -270,7 +270,7 @@ func (m model) moveCommand() tea.Cmd {
 func (m model) applyMoveResult(message worktreeMoveMsg) model {
 	m.moveWaiting = false
 	m.moveResult = message.result
-	if message.result.Err == nil {
+	if message.result.Moved {
 		item := &m.repositories[message.row.repository].Worktrees[message.row.worktree]
 		oldPath := item.Path
 		item.Path = message.result.Destination
@@ -393,6 +393,14 @@ func (m model) movingView() string {
 func (m model) moveResultView() string {
 	var output strings.Builder
 	if m.moveResult.Err != nil {
+		if m.moveResult.Moved {
+			output.WriteString("\n\x1b[1mMove incomplete\x1b[0m\n\n")
+			output.WriteString(truncate(m.moveResult.Source+" → "+m.moveResult.Destination, m.width))
+			output.WriteByte('\n')
+			output.WriteString(truncate(m.moveResult.Err.Error(), m.width))
+			output.WriteString("\n\n[enter] return to list  [q] quit\n")
+			return output.String()
+		}
 		output.WriteString("\n\x1b[1mMove failed\x1b[0m\n\n")
 		output.WriteString(truncate(m.moveResult.Err.Error(), m.width))
 		if m.moveBrowser.directory != "" {
