@@ -955,6 +955,86 @@ func TestReadCodexSessionDetailsFromFixture(t *testing.T) {
 	}
 }
 
+func TestReadCursorSessionDetailsFromFixture(t *testing.T) {
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		t.Skip("sqlite3 is unavailable")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	cwd := filepath.Join(home, "worktree")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	database := cursorDatabasePath(home)
+	databaseDirectory := filepath.Dir(database)
+	if err := os.MkdirAll(databaseDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"allComposers":[` +
+		`{"composerId":"open","name":"Open task","createdAt":1770000000000,"lastUpdatedAt":1770000300000,"isArchived":false,"workspaceIdentifier":{"uri":{"fsPath":"` + cwd + `"}}},` +
+		`{"composerId":"archived","subtitle":"Archived task","createdAt":1770000000000,"isArchived":true,"workspaceIdentifier":{"uri":{"fsPath":"` + cwd + `"}}},` +
+		`{"composerId":"unknown","name":"Unknown task","createdAt":1770000000000,"workspaceIdentifier":{"uri":{"fsPath":"` + cwd + `"}}},` +
+		`{"composerId":"malformed","createdAt":"not-a-number","workspaceIdentifier":{"uri":{"fsPath":"` + cwd + `"}}},` +
+		`{"composerId":"unmapped","name":"Unmapped task","isArchived":false,"workspaceIdentifier":{"id":"workspace-id"}}]}`
+	schema := "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);" +
+		"INSERT INTO ItemTable VALUES ('composer.composerHeaders', '" + strings.ReplaceAll(payload, "'", "''") + "');"
+	if output, err := exec.Command("sqlite3", database, schema).CombinedOutput(); err != nil {
+		t.Fatalf("create Cursor fixture: %v: %s", err, output)
+	}
+	sessions, err := (cursorSessionProvider{}).Sessions(context.Background())
+	cwd, _ = canonicalPath(cwd)
+	if err == nil || len(sessions) != 3 {
+		t.Fatalf("unexpected Cursor sessions: %#v, err=%v", sessions, err)
+	}
+	if sessions[0].ID != "open" || sessions[0].WorkingDirectory != cwd || sessions[0].Title != "Open task" || sessions[0].UpdatedAt.UnixMilli() != 1770000300000 || sessions[0].ArchiveStatus != sessionArchiveUnarchived || sessions[0].URL != "" {
+		t.Fatalf("unexpected open Cursor session: %#v", sessions[0])
+	}
+	if sessions[1].Title != "Archived task" || sessions[1].UpdatedAt.UnixMilli() != 1770000000000 || sessions[1].ArchiveStatus != sessionArchiveArchived {
+		t.Fatalf("unexpected archived Cursor session: %#v", sessions[1])
+	}
+	if sessions[2].ArchiveStatus != sessionArchiveUnknown {
+		t.Fatalf("unexpected unknown Cursor archive state: %#v", sessions[2])
+	}
+	if output, err := exec.Command("sqlite3", database, "DELETE FROM ItemTable WHERE key = 'composer.composerHeaders';").CombinedOutput(); err != nil {
+		t.Fatalf("remove Cursor fixture headers: %v: %s", err, output)
+	}
+	sessions, err = (cursorSessionProvider{}).Sessions(context.Background())
+	if err != nil || len(sessions) != 0 {
+		t.Fatalf("empty Cursor history was not reported as known: %#v, err=%v", sessions, err)
+	}
+	if output, err := exec.Command("sqlite3", database, "INSERT INTO ItemTable VALUES ('composer.composerHeaders', '{}');").CombinedOutput(); err != nil {
+		t.Fatalf("write malformed Cursor fixture headers: %v: %s", err, output)
+	}
+	sessions, err = (cursorSessionProvider{}).Sessions(context.Background())
+	if err == nil || len(sessions) != 0 {
+		t.Fatalf("malformed Cursor history was reported as known: %#v, err=%v", sessions, err)
+	}
+}
+
+func TestUnknownSessionArchiveStatusIsVisibleButNotFilterable(t *testing.T) {
+	item := worktree{Path: "/tmp/cursor", Sessions: worktreeSessions{Providers: []worktreeSessionProvider{{
+		Name: "Cursor", Known: true, Sessions: []agentSession{{Title: "Unknown Cursor task", ArchiveStatus: sessionArchiveUnknown}},
+	}}}}
+	if label := sessionLabel(item.Sessions); label != "Cu0? !" {
+		t.Fatalf("unexpected unknown archive label: %q", label)
+	}
+	if details := ansi.Strip(sessionDetailsView(item.Sessions, 100)); !strings.Contains(details, `Cursor: "Unknown Cursor task" · archive unknown`) {
+		t.Fatalf("unknown Cursor session was not shown: %q", details)
+	}
+	m := newModel([]repository{{Name: "example", Worktrees: []worktree{item}}})
+	updated, _ := m.updateKey("u")
+	m = updated.(model)
+	if len(m.visible) != 0 {
+		t.Fatalf("unknown session matched with-unarchived filter: %#v", m.visible)
+	}
+	updated, _ = m.updateKey("u")
+	m = updated.(model)
+	if len(m.visible) != 0 {
+		t.Fatalf("unknown session matched without-unarchived filter: %#v", m.visible)
+	}
+}
+
 func TestAssignSessionsUsesDeepestContainingWorktree(t *testing.T) {
 	repositories := []repository{{
 		Name: "example",
