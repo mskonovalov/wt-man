@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -49,7 +48,7 @@ type row struct {
 
 type displayedSession struct {
 	provider string
-	detail   sessionDetail
+	detail   agentSession
 }
 
 type deletionResult struct {
@@ -91,10 +90,7 @@ type repositoryDiscoveryMsg struct {
 }
 
 type sessionStatusMsg struct {
-	claude      map[string]map[string]sessionDetail
-	codex       map[string][]sessionDetail
-	claudeKnown bool
-	codexKnown  bool
+	providers []sessionProviderResult
 }
 
 type model struct {
@@ -134,10 +130,7 @@ type model struct {
 	discoveryDone       int
 	discoveryErr        error
 	sessionsPending     bool
-	claudeSessions      map[string]map[string]sessionDetail
-	codexSessions       map[string][]sessionDetail
-	claudeSessionsKnown bool
-	codexSessionsKnown  bool
+	sessionProviders    []sessionProviderResult
 }
 
 func newDiscoveringModel(root string) model {
@@ -165,6 +158,9 @@ func newModel(repositories []repository) model {
 			m.repositoryWidth = width
 		}
 		for worktreeIndex := range repo.Worktrees {
+			if len(m.repositories[repositoryIndex].Worktrees[worktreeIndex].Sessions.Providers) == 0 {
+				m.repositories[repositoryIndex].Worktrees[worktreeIndex].Sessions.Providers = unknownSessionProviders(sessionProviders)
+			}
 			branch := repo.Worktrees[worktreeIndex].Branch
 			if branch == "" {
 				branch = "detached"
@@ -231,7 +227,7 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.discoverySeen[message.commonDirectory] = true
 			if !m.sessionsPending {
 				repositories := []repository{message.repository}
-				assignSessions(repositories, m.claudeSessions, m.codexSessions, m.claudeSessionsKnown, m.codexSessionsKnown)
+				assignSessions(repositories, m.sessionProviders)
 				message.repository = repositories[0]
 			}
 			m.appendDiscoveredRepository(message.repository)
@@ -242,11 +238,8 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m.finishDiscovery()
 	case sessionStatusMsg:
 		m.sessionsPending = false
-		m.claudeSessions = message.claude
-		m.codexSessions = message.codex
-		m.claudeSessionsKnown = message.claudeKnown
-		m.codexSessionsKnown = message.codexKnown
-		assignSessions(m.repositories, message.claude, message.codex, message.claudeKnown, message.codexKnown)
+		m.sessionProviders = message.providers
+		assignSessions(m.repositories, message.providers)
 		if m.sessionMode != allSessions {
 			m.applyFilter()
 		}
@@ -435,8 +428,8 @@ func (m *model) applyFilter() {
 		repo := m.repositories[current.repository]
 		item := repo.Worktrees[current.worktree]
 		haystack := strings.ToLower(repo.Name + " " + item.Branch + " " + item.Path)
-		hasUnarchived := item.Sessions.Claude+item.Sessions.Codex > 0
-		absenceKnown := item.Sessions.ClaudeKnown && item.Sessions.CodexKnown
+		hasUnarchived := item.Sessions.unarchivedCount() > 0
+		absenceKnown := item.Sessions.archiveStatusKnown()
 		sessionMatches := m.sessionMode == allSessions ||
 			(m.sessionMode == withUnarchivedSessions && hasUnarchived) ||
 			(m.sessionMode == withoutUnarchivedSessions && absenceKnown && !hasUnarchived)
@@ -487,6 +480,9 @@ func (m *model) appendDiscoveredRepository(repo repository) {
 		m.repositoryWidth = width
 	}
 	for worktreeIndex, item := range repo.Worktrees {
+		if len(repo.Worktrees[worktreeIndex].Sessions.Providers) == 0 {
+			repo.Worktrees[worktreeIndex].Sessions.Providers = unknownSessionProviders(sessionProviders)
+		}
 		branch := item.Branch
 		if branch == "" {
 			branch = "detached"
@@ -515,10 +511,7 @@ func (m model) finishDiscovery() (tea.Model, tea.Cmd) {
 	loaded.generation = m.generation
 	loaded.root = m.root
 	loaded.sessionsPending = m.sessionsPending
-	loaded.claudeSessions = m.claudeSessions
-	loaded.codexSessions = m.codexSessions
-	loaded.claudeSessionsKnown = m.claudeSessionsKnown
-	loaded.codexSessionsKnown = m.codexSessionsKnown
+	loaded.sessionProviders = m.sessionProviders
 	loaded.applyFilter()
 	return loaded, loaded.Init()
 }
@@ -811,20 +804,31 @@ func (m model) browseView() string {
 	return output.String()
 }
 
-func sessionLabel(sessions sessionCounts) string {
-	claude := "?"
-	if sessions.ClaudeKnown {
-		claude = fmt.Sprint(sessions.Claude)
-	}
-	codex := "?"
-	if sessions.CodexKnown {
-		codex = fmt.Sprint(sessions.Codex)
+func sessionLabel(sessions worktreeSessions) string {
+	var labels []string
+	for _, provider := range sessions.Providers {
+		count := "?"
+		if provider.archiveStatusKnown() {
+			count = fmt.Sprint(len(provider.unarchivedSessions()))
+		}
+		labels = append(labels, sessionProviderAbbreviation(provider.Name)+count)
 	}
 	warning := ""
-	if sessions.Claude+sessions.Codex > 0 || !sessions.ClaudeKnown || !sessions.CodexKnown {
+	if sessions.unarchivedCount() > 0 || !sessions.archiveStatusKnown() {
 		warning = " !"
 	}
-	return fmt.Sprintf("C%s X%s%s", claude, codex, warning)
+	return strings.Join(labels, " ") + warning
+}
+
+func sessionProviderAbbreviation(provider string) string {
+	switch provider {
+	case "Claude":
+		return "C"
+	case "Codex":
+		return "X"
+	default:
+		return provider
+	}
 }
 
 func (m model) sessionDetailsHeight() int {
@@ -834,13 +838,12 @@ func (m model) sessionDetailsHeight() int {
 	return browseSessionDetailsHeight
 }
 
-func sessionDetailsView(sessions sessionCounts, width int) string {
+func sessionDetailsView(sessions worktreeSessions, width int) string {
 	var details []displayedSession
-	for _, detail := range sessions.ClaudeSessions {
-		details = append(details, displayedSession{provider: "Claude", detail: detail})
-	}
-	for _, detail := range sessions.CodexSessions {
-		details = append(details, displayedSession{provider: "Codex", detail: detail})
+	for _, provider := range sessions.Providers {
+		for _, detail := range provider.unarchivedSessions() {
+			details = append(details, displayedSession{provider: provider.Name, detail: detail})
+		}
 	}
 	if len(details) == 0 {
 		return ""
@@ -943,22 +946,7 @@ func scanRepository(generation int, gitRoot string, gitRoots []string) tea.Cmd {
 
 func scanSessionStatus() tea.Cmd {
 	return func() tea.Msg {
-		var claude map[string]map[string]sessionDetail
-		var codex map[string][]sessionDetail
-		var claudeKnown bool
-		var codexKnown bool
-		var wait sync.WaitGroup
-		wait.Add(2)
-		go func() {
-			defer wait.Done()
-			claude, claudeKnown = readClaudeSessions()
-		}()
-		go func() {
-			defer wait.Done()
-			codex, codexKnown = readCodexSessions(context.Background())
-		}()
-		wait.Wait()
-		return sessionStatusMsg{claude: claude, codex: codex, claudeKnown: claudeKnown, codexKnown: codexKnown}
+		return sessionStatusMsg{providers: readSessionProviders(context.Background(), sessionProviders)}
 	}
 }
 
@@ -1065,23 +1053,21 @@ func (m model) reviewView() string {
 				output.WriteString("  delete files and Git record")
 			}
 		}
-		if item.Sessions.Claude+item.Sessions.Codex > 0 {
+		if item.Sessions.unarchivedCount() > 0 {
 			var active []string
-			if item.Sessions.Claude > 0 {
-				active = append(active, fmt.Sprintf("Claude %d", item.Sessions.Claude))
-			}
-			if item.Sessions.Codex > 0 {
-				active = append(active, fmt.Sprintf("Codex %d", item.Sessions.Codex))
+			for _, provider := range item.Sessions.Providers {
+				if count := len(provider.unarchivedSessions()); count > 0 {
+					active = append(active, fmt.Sprintf("%s %d", provider.Name, count))
+				}
 			}
 			fmt.Fprintf(&output, "  \x1b[33m%s unarchived\x1b[0m", strings.Join(active, ", "))
 		}
-		if !item.Sessions.ClaudeKnown || !item.Sessions.CodexKnown {
+		if !item.Sessions.archiveStatusKnown() {
 			var unknown []string
-			if !item.Sessions.ClaudeKnown {
-				unknown = append(unknown, "Claude")
-			}
-			if !item.Sessions.CodexKnown {
-				unknown = append(unknown, "Codex")
+			for _, provider := range item.Sessions.Providers {
+				if !provider.archiveStatusKnown() {
+					unknown = append(unknown, provider.Name)
+				}
 			}
 			fmt.Fprintf(&output, "  \x1b[33m%s session status unknown\x1b[0m", strings.Join(unknown, "/"))
 		}
