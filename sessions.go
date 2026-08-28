@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 )
@@ -27,9 +28,11 @@ type agentSession struct {
 type sessionProvider interface {
 	Name() string
 	Sessions(context.Context) ([]agentSession, error)
+	MoveHint(agentSession, string) string
 }
 
 type sessionProviderResult struct {
+	Provider sessionProvider
 	Name     string
 	Sessions []agentSession
 	Err      error
@@ -40,6 +43,7 @@ type worktreeSessions struct {
 }
 
 type worktreeSessionProvider struct {
+	Provider sessionProvider
 	Name     string
 	Known    bool
 	Sessions []agentSession
@@ -59,7 +63,7 @@ func readSessionProviders(ctx context.Context, providers []sessionProvider) []se
 		go func() {
 			defer wait.Done()
 			sessions, err := provider.Sessions(ctx)
-			results[index] = sessionProviderResult{Name: provider.Name(), Sessions: sessions, Err: err}
+			results[index] = sessionProviderResult{Provider: provider, Name: provider.Name(), Sessions: sessions, Err: err}
 		}()
 	}
 	wait.Wait()
@@ -69,9 +73,14 @@ func readSessionProviders(ctx context.Context, providers []sessionProvider) []se
 func unknownSessionProviders(providers []sessionProvider) []worktreeSessionProvider {
 	result := make([]worktreeSessionProvider, len(providers))
 	for index, provider := range providers {
+		result[index].Provider = provider
 		result[index].Name = provider.Name()
 	}
 	return result
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func sessionTime(milliseconds int64) time.Time {

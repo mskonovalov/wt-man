@@ -19,6 +19,10 @@ const (
 	reviewScreen
 	deletingScreen
 	resultsScreen
+	moveBrowserScreen
+	moveConfirmScreen
+	movingScreen
+	moveResultScreen
 )
 
 const browseSessionDetailsHeight = 5
@@ -130,6 +134,12 @@ type model struct {
 	discoveryDone       int
 	discoveryErr        error
 	sessionsPending     bool
+	moveRow             row
+	moveBrowser         moveBrowser
+	moveDestination     string
+	moveResult          worktreeMoveResult
+	moveWaiting         bool
+	moveScansPaused     bool
 	sessionProviders    []sessionProviderResult
 }
 
@@ -257,6 +267,8 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.deleteNext()
+	case worktreeMoveMsg:
+		return m.applyMoveResult(message), nil
 	case modificationTimeMsg:
 		if message.generation != m.generation {
 			return m, nil
@@ -267,6 +279,10 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.screen == deletingScreen && m.deletionWaiting {
 			m.deletionWaiting = false
 			return m, m.deleteNext()
+		}
+		if m.screen == movingScreen && m.moveWaiting {
+			m.moveWaiting = false
+			return m, m.moveCommand()
 		}
 		if len(m.modificationQueue) == 0 {
 			return m, nil
@@ -301,7 +317,7 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyPressMsg:
 		if message.String() == "ctrl+c" {
-			if m.screen == deletingScreen {
+			if m.screen == deletingScreen || m.screen == movingScreen {
 				return m, nil
 			}
 			return m, tea.Quit
@@ -312,6 +328,9 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateKey(key string) (tea.Model, tea.Cmd) {
+	if m.screen == moveBrowserScreen || m.screen == moveConfirmScreen || m.screen == movingScreen || m.screen == moveResultScreen {
+		return m.updateMoveKey(key)
+	}
 	if m.screen == deletingScreen {
 		return m, nil
 	}
@@ -387,6 +406,10 @@ func (m model) updateKey(key string) (tea.Model, tea.Cmd) {
 		}
 	case "R":
 		return m.queueModificationRefresh(m.rows)
+	case "M":
+		if !m.discoveryPending {
+			return m.beginMove()
+		}
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
@@ -629,6 +652,7 @@ func (m model) returnToList() (tea.Model, tea.Cmd) {
 	refreshed.sessionMode = m.sessionMode
 	refreshed.pullRequestMode = m.pullRequestMode
 	refreshed.generation = m.generation + 1
+	refreshed.root = m.root
 	refreshed.applyFilter()
 	return refreshed, refreshed.Init()
 }
@@ -644,6 +668,14 @@ func (m model) View() tea.View {
 		content = m.deletingView()
 	case resultsScreen:
 		content = m.resultsView()
+	case moveBrowserScreen:
+		content = m.moveBrowserView()
+	case moveConfirmScreen:
+		content = m.moveConfirmView()
+	case movingScreen:
+		content = m.movingView()
+	case moveResultScreen:
+		content = m.moveResultView()
 	}
 	view := tea.NewView(content)
 	view.AltScreen = true
@@ -669,7 +701,7 @@ func (m model) browseView() string {
 	} else if m.query != "" {
 		fmt.Fprintf(&output, "Filter: %s  (/ to edit)\n\n", m.query)
 	} else {
-		output.WriteString("/ filter  u sessions  p PR  r refresh  R refresh all  space select  a all  enter review  q quit\n\n")
+		output.WriteString("/ filter  u sessions  p PR  M move  r refresh  R refresh all  space select  a all  enter review  q quit\n\n")
 	}
 
 	end := m.offset + m.pageSize()

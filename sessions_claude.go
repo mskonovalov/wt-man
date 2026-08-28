@@ -17,6 +17,10 @@ func (claudeSessionProvider) Name() string {
 	return "Claude"
 }
 
+func (claudeSessionProvider) MoveHint(session agentSession, destination string) string {
+	return "Claude: cd " + shellQuote(destination) + " && claude --resume " + shellQuote(session.ID)
+}
+
 func (claudeSessionProvider) Sessions(context.Context) ([]agentSession, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {

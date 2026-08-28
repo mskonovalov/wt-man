@@ -17,6 +17,10 @@ func (codexSessionProvider) Name() string {
 	return "Codex"
 }
 
+func (codexSessionProvider) MoveHint(session agentSession, destination string) string {
+	return "Codex: codex resume -C " + shellQuote(destination) + " " + shellQuote(session.ID)
+}
+
 func (codexSessionProvider) Sessions(ctx context.Context) ([]agentSession, error) {
 	if _, err := exec.LookPath("sqlite3"); err != nil {
 		return nil, err
