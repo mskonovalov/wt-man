@@ -941,7 +941,12 @@ func TestReadCodexSessionDetailsFromFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	database := filepath.Join(codexHome, "sqlite", "state_5.sqlite")
+	loopPath := filepath.Join(codexHome, "loop")
+	if err := os.Symlink(loopPath, loopPath); err != nil {
+		t.Fatal(err)
+	}
 	schema := "CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, model TEXT, updated_at INTEGER, updated_at_ms INTEGER, archived INTEGER);" +
+		"INSERT INTO threads VALUES ('broken-session', '" + loopPath + "', 'Broken task', 'gpt-5.6', 1770000000, 1770000300000, 0);" +
 		"INSERT INTO threads VALUES ('codex-session', '" + cwd + "', 'Review worktrees', 'gpt-5.6', 1770000000, 1770000300000, 0);" +
 		"INSERT INTO threads VALUES ('archived-session', '" + cwd + "', 'Archived task', 'gpt-5.6', 1770000000, 1770000300000, 1);"
 	if output, err := exec.Command("sqlite3", database, schema).CombinedOutput(); err != nil {
@@ -949,7 +954,7 @@ func TestReadCodexSessionDetailsFromFixture(t *testing.T) {
 	}
 	sessions, err := (codexSessionProvider{}).Sessions(context.Background())
 	cwd, _ = canonicalPath(cwd)
-	if err != nil || len(sessions) != 2 || sessions[0].WorkingDirectory != cwd || sessions[0].Title != "Review worktrees" || sessions[0].Model != "gpt-5.6" || sessions[0].URL != "codex://threads/codex-session" || sessions[0].UpdatedAt.UnixMilli() != 1770000300000 || sessions[0].ArchiveStatus != sessionArchiveUnarchived || sessions[1].ArchiveStatus != sessionArchiveArchived {
+	if err == nil || len(sessions) != 2 || sessions[0].WorkingDirectory != cwd || sessions[0].Title != "Review worktrees" || sessions[0].Model != "gpt-5.6" || sessions[0].URL != "codex://threads/codex-session" || sessions[0].UpdatedAt.UnixMilli() != 1770000300000 || sessions[0].ArchiveStatus != sessionArchiveUnarchived || sessions[1].ArchiveStatus != sessionArchiveArchived {
 		t.Fatalf("unexpected sessions: %#v, err=%v", sessions, err)
 	}
 }
@@ -960,11 +965,13 @@ func TestReadCursorSessionDetailsFromFixture(t *testing.T) {
 	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
 	cwd := filepath.Join(home, "worktree")
 	if err := os.MkdirAll(cwd, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	databaseDirectory := filepath.Join(home, "Library", "Application Support", "Cursor", "User", "globalStorage")
+	database := cursorDatabasePath(home)
+	databaseDirectory := filepath.Dir(database)
 	if err := os.MkdirAll(databaseDirectory, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -972,8 +979,8 @@ func TestReadCursorSessionDetailsFromFixture(t *testing.T) {
 		`{"composerId":"open","name":"Open task","createdAt":1770000000000,"lastUpdatedAt":1770000300000,"isArchived":false,"workspaceIdentifier":{"uri":{"fsPath":"` + cwd + `"}}},` +
 		`{"composerId":"archived","subtitle":"Archived task","createdAt":1770000000000,"isArchived":true,"workspaceIdentifier":{"uri":{"fsPath":"` + cwd + `"}}},` +
 		`{"composerId":"unknown","name":"Unknown task","createdAt":1770000000000,"workspaceIdentifier":{"uri":{"fsPath":"` + cwd + `"}}},` +
+		`{"composerId":"malformed","createdAt":"not-a-number","workspaceIdentifier":{"uri":{"fsPath":"` + cwd + `"}}},` +
 		`{"composerId":"unmapped","name":"Unmapped task","isArchived":false,"workspaceIdentifier":{"id":"workspace-id"}}]}`
-	database := filepath.Join(databaseDirectory, "state.vscdb")
 	schema := "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);" +
 		"INSERT INTO ItemTable VALUES ('composer.composerHeaders', '" + strings.ReplaceAll(payload, "'", "''") + "');"
 	if output, err := exec.Command("sqlite3", database, schema).CombinedOutput(); err != nil {
@@ -981,7 +988,7 @@ func TestReadCursorSessionDetailsFromFixture(t *testing.T) {
 	}
 	sessions, err := (cursorSessionProvider{}).Sessions(context.Background())
 	cwd, _ = canonicalPath(cwd)
-	if err != nil || len(sessions) != 3 {
+	if err == nil || len(sessions) != 3 {
 		t.Fatalf("unexpected Cursor sessions: %#v, err=%v", sessions, err)
 	}
 	if sessions[0].ID != "open" || sessions[0].WorkingDirectory != cwd || sessions[0].Title != "Open task" || sessions[0].UpdatedAt.UnixMilli() != 1770000300000 || sessions[0].ArchiveStatus != sessionArchiveUnarchived || sessions[0].URL != "" {
@@ -992,6 +999,20 @@ func TestReadCursorSessionDetailsFromFixture(t *testing.T) {
 	}
 	if sessions[2].ArchiveStatus != sessionArchiveUnknown {
 		t.Fatalf("unexpected unknown Cursor archive state: %#v", sessions[2])
+	}
+	if output, err := exec.Command("sqlite3", database, "DELETE FROM ItemTable WHERE key = 'composer.composerHeaders';").CombinedOutput(); err != nil {
+		t.Fatalf("remove Cursor fixture headers: %v: %s", err, output)
+	}
+	sessions, err = (cursorSessionProvider{}).Sessions(context.Background())
+	if err != nil || len(sessions) != 0 {
+		t.Fatalf("empty Cursor history was not reported as known: %#v, err=%v", sessions, err)
+	}
+	if output, err := exec.Command("sqlite3", database, "INSERT INTO ItemTable VALUES ('composer.composerHeaders', '{}');").CombinedOutput(); err != nil {
+		t.Fatalf("write malformed Cursor fixture headers: %v: %s", err, output)
+	}
+	sessions, err = (cursorSessionProvider{}).Sessions(context.Background())
+	if err == nil || len(sessions) != 0 {
+		t.Fatalf("malformed Cursor history was reported as known: %#v, err=%v", sessions, err)
 	}
 }
 
@@ -1178,6 +1199,10 @@ func TestDiscoveryAddsRepositoriesBeforeScanCompletes(t *testing.T) {
 	m = updated.(model)
 	if command == nil || !m.discoveryPending || len(m.visible) != 1 || m.item(m.visible[0]).Path != "/tmp/one-linked" {
 		t.Fatalf("repository was not shown during discovery: %#v", m)
+	}
+	sessions := m.item(m.visible[0]).Sessions
+	if label := sessionLabel(sessions); len(sessions.Providers) != len(sessionProviders) || label == " !" {
+		t.Fatalf("pending session providers were not shown: %q, providers=%#v", label, sessions.Providers)
 	}
 }
 

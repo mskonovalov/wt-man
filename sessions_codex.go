@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -55,10 +56,12 @@ func (codexSessionProvider) Sessions(ctx context.Context) ([]agentSession, error
 		}
 	}
 	sessions := make([]agentSession, 0, len(stored))
+	var sourceErr error
 	for _, storedSession := range stored {
 		cwd, err := canonicalPath(storedSession.CWD)
 		if err != nil {
-			return sessions, fmt.Errorf("resolve Codex session directory: %w", err)
+			sourceErr = errors.Join(sourceErr, fmt.Errorf("resolve Codex session directory: %w", err))
+			continue
 		}
 		archiveStatus := sessionArchiveUnarchived
 		if storedSession.Archived != 0 {
@@ -69,5 +72,5 @@ func (codexSessionProvider) Sessions(ctx context.Context) ([]agentSession, error
 			URL: "codex://threads/" + url.PathEscape(storedSession.ID), UpdatedAt: sessionTime(storedSession.UpdatedAtMS), ArchiveStatus: archiveStatus,
 		})
 	}
-	return sessions, nil
+	return sessions, sourceErr
 }
