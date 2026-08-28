@@ -13,7 +13,6 @@ import (
 type worktreeMoveResult struct {
 	Source      string
 	Destination string
-	Moved       bool
 	Err         error
 }
 
@@ -116,7 +115,6 @@ func moveWorktree(ctx context.Context, repo repository, item worktree, parent st
 		result.Err = err
 		return result
 	}
-	result.Moved = true
 	if err := verifyPathRemoved(item.Path); err != nil {
 		result.Err = fmt.Errorf("verify old worktree path removed: %w", err)
 		return result
