@@ -326,6 +326,20 @@ func TestRemoveWorktreeKeepsClosedUnmergedBranch(t *testing.T) {
 	}
 }
 
+func TestVerifyPathRemovedUsesLstat(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "worktree")
+	if err := verifyPathRemoved(path); err != nil {
+		t.Fatalf("missing path was rejected: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "missing-target"), path); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyPathRemoved(path); err == nil || !strings.Contains(err.Error(), "still exists") {
+		t.Fatalf("dangling symlink was treated as removed: %v", err)
+	}
+}
+
 func TestRemoveWorktreeRefusesUnreachableDetachedHead(t *testing.T) {
 	ctx := context.Background()
 	repoPath := t.TempDir()

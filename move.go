@@ -115,5 +115,9 @@ func moveWorktree(ctx context.Context, repo repository, item worktree, parent st
 		result.Err = err
 		return result
 	}
+	if err := verifyPathRemoved(item.Path); err != nil {
+		result.Err = fmt.Errorf("verify old worktree path removed: %w", err)
+		return result
+	}
 	return result
 }

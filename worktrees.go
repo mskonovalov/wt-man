@@ -554,6 +554,10 @@ func removeWorktree(ctx context.Context, repo repository, item worktree, deleteB
 		return result
 	}
 	result.Removed = true
+	if err := verifyPathRemoved(item.Path); err != nil {
+		result.Err = fmt.Errorf("verify worktree files removed: %w", err)
+		return result
+	}
 	if deleteBranch && item.Branch != "" {
 		if _, err := git(ctx, repo.MainPath, "branch", "-d", item.Branch); err != nil {
 			result.Err = fmt.Errorf("worktree removed; branch not deleted: %w", err)
@@ -562,6 +566,15 @@ func removeWorktree(ctx context.Context, repo repository, item worktree, deleteB
 		result.BranchDeleted = true
 	}
 	return result
+}
+
+func verifyPathRemoved(path string) error {
+	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect removed path: %w", err)
+	}
+	return fmt.Errorf("path still exists: %s", path)
 }
 
 func commitReachableFromRef(ctx context.Context, directory, head string) (bool, error) {
